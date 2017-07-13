@@ -24,12 +24,12 @@ srcdir = .
 top_srcdir = .
 
 
-prefix = /usr/local/apache2
-exec_prefix = /usr/local/apache2
+prefix = /home/utcpdev/mtcp/apps/apache_benchmark/linux
+exec_prefix = /home/utcpdev/mtcp/apps/apache_benchmark/linux
 
-bindir = /usr/local/apache2/bin
-libdir = /usr/local/apache2/lib
-includedir = /usr/local/apache2/include
+bindir = /home/utcpdev/mtcp/apps/apache_benchmark/linux/bin
+libdir = /home/utcpdev/mtcp/apps/apache_benchmark/linux/lib
+includedir = /home/utcpdev/mtcp/apps/apache_benchmark/linux/include
 mandir = ${prefix}/man/man1
 
 top_builddir = .

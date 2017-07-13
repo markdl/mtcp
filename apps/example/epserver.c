@@ -152,7 +152,7 @@ SendUntilAvailable(struct thread_context *ctx, int sockid, struct server_vars *s
 			break;
 		}
 		ret = mtcp_write(ctx->mctx, sockid,  
-				fcache[sv->fidx].file + sv->total_sent, len);
+							  fcache[sv->fidx].file + sv->total_sent, len);
 		if (ret < 0) {
 			TRACE_APP("Connection closed with client.\n");
 			break;

@@ -1,0 +1,39 @@
+Configuration updated by mtcp_setconf().
+---------------------------------------------------------------------------------
+Loading mtcp configuration from : config/mtcp.conf
+Loading interface setting
+EAL: Detected 24 lcore(s)
+EAL: Auto-detected process type: PRIMARY
+EAL: No free hugepages reported in hugepages-1048576kB
+Total number of attached devices: 1
+Interface name: dpdk0
+Configurations:
+Number of CPU cores available: 2
+Number of CPU cores to use: 2
+Maximum number of concurrency per core: 10000
+Maximum number of preallocated buffers per core: 10000
+Receive buffer size: 2048
+Send buffer size: 2048
+TCP timeout seconds: 30
+TCP timewait seconds: 0
+NICs to print statistics: dpdk0
+---------------------------------------------------------------------------------
+Interfaces:
+name: dpdk0, ifindex: 0, hwaddr: A0:36:9F:AA:8E:D6, ipaddr: 10.0.0.11, netmask: 255.255.255.0
+Number of NIC queues: 2
+---------------------------------------------------------------------------------
+Loading routing configurations from : config/route.conf
+Routes:
+Destination: 10.0.0.0/24, Mask: 255.255.255.0, Masked: 10.0.0.0, Route: ifdx-0
+Destination: 10.0.0.11/24, Mask: 255.255.255.0, Masked: 10.0.0.0, Route: ifdx-0
+---------------------------------------------------------------------------------
+Loading ARP table from : config/arp.conf
+ARP Table:
+IP addr: 10.0.0.4, dst_hwaddr: A0:36:9F:B5:6E:DC
+IP addr: 10.0.1.11, dst_hwaddr: A0:36:9F:AA:8E:D6
+---------------------------------------------------------------------------------
+CPU 0: initialization finished.
+[mtcp_create_context:1223] CPU 0 is now the master thread.
+[CPU 0] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+[ ALL ] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+CPU 1: initialization finished.

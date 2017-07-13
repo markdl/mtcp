@@ -1,0 +1,16 @@
+#! /bin/sh
+#
+# Created by configure
+
+"/home/utcpdev/mtcp/apps/apache_benchmark/srclib/apr/configure" \
+"--disable-option-checking" \
+"--cache-file=/dev/null" \
+"--srcdir=/home/utcpdev/mtcp/apps/apache_benchmark/srclib/apr" \
+"--prefix=/home/utcpdev/mtcp/apps/apache_benchmark/linux" \
+"--exec-prefix=/home/utcpdev/mtcp/apps/apache_benchmark/linux" \
+"--libdir=/home/utcpdev/mtcp/apps/apache_benchmark/linux/lib" \
+"--includedir=/home/utcpdev/mtcp/apps/apache_benchmark/linux/include" \
+"--bindir=/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin" \
+"--datadir=/home/utcpdev/mtcp/apps/apache_benchmark/linux" \
+"--with-installbuilddir=/home/utcpdev/mtcp/apps/apache_benchmark/linux/build" \
+"$@"

@@ -1,0 +1,60 @@
+Applying listen_backlog: 16000
+Configuration updated by mtcp_setconf().
+---------------------------------------------------------------------------------
+Loading mtcp configuration from : mtcp.conf
+Loading interface setting
+EAL: Detected 24 lcore(s)
+EAL: Auto-detected process type: PRIMARY
+EAL: No free hugepages reported in hugepages-1048576kB
+Total number of attached devices: 1
+Interface name: dpdk0
+Configurations:
+Number of CPU cores available: 8
+Number of CPU cores to use: 8
+Maximum number of concurrency per core: 32255
+Maximum number of preallocated buffers per core: 32255
+Receive buffer size: 8192
+Send buffer size: 16384
+TCP timeout seconds: 30
+TCP timewait seconds: 0
+NICs to print statistics: dpdk0
+---------------------------------------------------------------------------------
+Interfaces:
+name: dpdk0, ifindex: 0, hwaddr: A0:36:9F:AA:8E:D6, ipaddr: 10.0.0.11, netmask: 255.255.255.0
+Number of NIC queues: 8
+---------------------------------------------------------------------------------
+Loading routing configurations from : config/route.conf
+Routes:
+Destination: 10.0.0.0/24, Mask: 255.255.255.0, Masked: 10.0.0.0, Route: ifdx-0
+Destination: 10.0.0.11/24, Mask: 255.255.255.0, Masked: 10.0.0.0, Route: ifdx-0
+---------------------------------------------------------------------------------
+Loading ARP table from : config/arp.conf
+ARP Table:
+IP addr: 10.0.0.4, dst_hwaddr: A0:36:9F:B5:6E:DC
+IP addr: 10.0.0.11, dst_hwaddr: A0:36:9F:AA:8E:D6
+---------------------------------------------------------------------------------
+Configuration updated by mtcp_setconf().
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: index-file.names (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: url.access-deny (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: static-file.exclude-extensions (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.activate (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.hide-dotfiles (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.exclude (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.encoding (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.hide-header-file (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.show-header (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.hide-readme-file (ignored) 
+2017-06-23 14:38:14: (server.c.1745) WARNING: unknown config-key: dir-listing.show-readme (ignored) 
+CPU 0: initialization finished.
+[mtcp_create_context:1223] CPU 0 is now the master thread.
+[CPU 0] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+[ ALL ] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+[CPU 0] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+[ ALL ] dpdk0 flows:      0, RX:       0(pps) (err:     0),  0.00(Gbps), TX:       0(pps),  0.00(Gbps)
+CPU 6: initialization finished.
+CPU 3: initialization finished.
+CPU 5: initialization finished.
+CPU 2: initialization finished.
+CPU 7: initialization finished.
+CPU 4: initialization finished.
+CPU 1: initialization finished.

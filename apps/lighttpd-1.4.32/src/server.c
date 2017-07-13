@@ -1594,7 +1594,7 @@ main(int argc, char **argv) {
 	mcfg.num_cores = cpus;
 	mtcp_setconf(&mcfg);
 	/* initialize the mtcp context */
-	if (mtcp_init("mtcp.conf")) {
+	if (mtcp_init("/home/utcpdev/mtcp/config/mtcp.conf")) {
 		fprintf(stderr, "Failed to initialize mtcp\n");
 		goto clean_up;
 	}

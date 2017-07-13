@@ -27,19 +27,19 @@
 # installation when using *external* copies of apr/apr-util,
 # the absolute path must be used, not DESTDIR-relocated.
 
-if test -f ${DESTDIR}/usr/local/apache2/bin/apr-1-config; then
-   APR_CONFIG=${DESTDIR}/usr/local/apache2/bin/apr-1-config
-   APU_CONFIG=${DESTDIR}/usr/local/apache2/bin/apu-1-config
+if test -f ${DESTDIR}/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin/apr-1-config; then
+   APR_CONFIG=${DESTDIR}/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin/apr-1-config
+   APU_CONFIG=${DESTDIR}/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin/apu-1-config
 else
-   APR_CONFIG=/usr/local/apache2/bin/apr-1-config
-   APU_CONFIG=/usr/local/apache2/bin/apu-1-config
+   APR_CONFIG=/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin/apr-1-config
+   APU_CONFIG=/home/utcpdev/mtcp/apps/apache_benchmark/linux/bin/apu-1-config
 fi
 
 APR_LIBTOOL="`${APR_CONFIG} --apr-libtool`"
 APR_INCLUDEDIR="`${APR_CONFIG} --includedir`"
 APU_INCLUDEDIR="`${APU_CONFIG} --includedir`"
 
-installbuilddir="/usr/local/apache2/build"
+installbuilddir="/home/utcpdev/mtcp/apps/apache_benchmark/linux/build"
 
 exec sed "
 /^[A-Z_]*_LDADD/d

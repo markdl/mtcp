@@ -1,0 +1,9 @@
+*.o
+*.d
+*.lo
+*.so
+*.a
+*.la
+*~
+log_*
+.gdb_history

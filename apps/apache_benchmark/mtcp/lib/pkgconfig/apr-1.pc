@@ -1,0 +1,11 @@
+prefix=/home/utcpdev/mtcp/apps/apache_benchmark/mtcp
+exec_prefix=/home/utcpdev/mtcp/apps/apache_benchmark/mtcp
+libdir=${prefix}/lib
+APR_MAJOR_VERSION=1
+includedir=/home/utcpdev/mtcp/apps/apache_benchmark/mtcp/include
+
+Name: APR
+Description: The Apache Portable Runtime library
+Version: 1.4.6
+Libs: -L${libdir} -lapr-${APR_MAJOR_VERSION} -lrt -lcrypt  -lpthread -ldl
+Cflags: -DLINUX -D_REENTRANT -D_GNU_SOURCE -g -O2 -pthread -I/home/utcpdev/mtcp/mtcp/lib/ -I/home/utcpdev/mtcp/mtcp/src/include/ -DMULTI_THREADED -I${includedir}
