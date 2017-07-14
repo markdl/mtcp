@@ -731,6 +731,7 @@ main(int argc, char **argv)
 						  "of CPUs: %d\n", num_cores);
 				return EXIT_FAILURE;
 			}
+			break;
 #ifndef USE_LINUX
 		case 'f': // MTCP configuration file
 			conf_file = optarg;
@@ -744,6 +745,7 @@ main(int argc, char **argv)
 				return EXIT_FAILURE;
 			}
 			core_limit = process_cpu; // Ensures we only spawn one thread
+			break;
 		case 'b':
 			backlog = mystrtol(optarg, 10);
 			break;
