@@ -67,10 +67,10 @@ mtcp-messenger-client: mtcp-messenger-client.o hashmap.o linked_list.o
 	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
 
 linux-messenger-client.o: client.c
-	${CC} -c $^ ${INCL} -o $@
+	${CC} -c -DUSE_LINUX $^ ${INCL} -o $@
 
 linux-messenger-client: linux-messenger-client.o hashmap.o linked_list.o
-	${CC} $^ -DUSE_LINUX ${LIBS} ${MTCP_UTIL_OBJ} -o $@
+	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
 
 
 clean:
