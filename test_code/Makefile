@@ -17,7 +17,7 @@ LIBS=-L${SSL_INSTALL}/lib -l:libssl.a -l:libcrypto.a -Wl,-rpath=${SSL_INSTALL}/l
 #LIBS=-lssl -lcrypto
 LIBS+=-ldl -L${MTCP_INSTALL}/lib -L${DPDK_INSTALL}/lib -L${DPDK_INSTALL}/lib -lmtcp -lpthread -lnuma ${DPDK_LIB_FLAGS}
 
-TARGETS = linux-server mtcp-server linux-messenger mtcp-messenger ssl-linux-messenger ssl-mtcp-messenger
+TARGETS = linux-server mtcp-server linux-messenger mtcp-messenger ssl-linux-messenger ssl-mtcp-messenger linux-messenger-client mtcp-messenger-client #ssl-linux-messenger ssl-mtcp-messenger
 
 all: ${TARGETS}
 
@@ -59,6 +59,19 @@ ssl-mtcp-messenger.o: messenger.c
 
 ssl-mtcp-messenger: ssl-mtcp-messenger.o hashmap.o linked_list.o
 	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
+
+mtcp-messenger-client.o: client.c
+	${CC} -c $^ ${INCL} -o $@
+
+mtcp-messenger-client: mtcp-messenger-client.o hashmap.o linked_list.o
+	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
+
+linux-messenger-client.o: client.c
+	${CC} -c $^ ${INCL} -o $@
+
+linux-messenger-client: linux-messenger-client.o hashmap.o linked_list.o
+	${CC} $^ -DUSE_LINUX ${LIBS} ${MTCP_UTIL_OBJ} -o $@
+
 
 clean:
 	rm -f *.o *~ \#*\# ${TARGETS}
