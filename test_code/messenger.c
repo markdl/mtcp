@@ -91,9 +91,8 @@ struct thread_context {
 	int ep;
 	uint64_t connects;
 	uint64_t msgs_sent;
-	struct timeval first_connection;
-	struct timeval last_connection;
-
+	uint64_t bytes_sent;
+	
 	struct connection *connections;
 };
 /*----------------------------------------------------------------------------*/
@@ -124,7 +123,20 @@ int use_global_lock = FALSE;
 static pthread_mutex_t *locks;
 #endif
 /*----------------------------------------------------------------------------*/
-int setsock_nonblock(int fd) {
+void
+print_interval_stats(struct thread_context *ctx, int core)
+{
+	double tp = (ctx->bytes_sent * 8.0) / 1024 / 1024 / 1024;
+	fprintf(stderr, "[CPU %d] Interval stats - M/s: %lu, Tp: %.2f Gbps, "
+			  "Cnx/s: %lu\n", core, ctx->msgs_sent, tp, ctx->connects);
+	ctx->msgs_sent = 0;
+	ctx->bytes_sent = 0;
+	ctx->connects = 0;
+}
+/*----------------------------------------------------------------------------*/
+int
+setsock_nonblock(int fd)
+{
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) {
 		perror("fcntl get");
@@ -138,7 +150,8 @@ int setsock_nonblock(int fd) {
 }
 /*----------------------------------------------------------------------------*/
 #ifdef USE_SSL
-void thread_locking(int mode, int n, const char* file, int line)
+void
+thread_locking(int mode, int n, const char* file, int line)
 {
 	if (mode & CRYPTO_LOCK)
 		pthread_mutex_lock(&locks[n]);
@@ -146,12 +159,14 @@ void thread_locking(int mode, int n, const char* file, int line)
 		pthread_mutex_unlock(&locks[n]);
 }
 /*----------------------------------------------------------------------------*/
-unsigned long thread_id()
+unsigned long
+thread_id()
 {
 	return (unsigned long) pthread_self();
 }
 /*----------------------------------------------------------------------------*/
-void thread_setup()
+void
+thread_setup()
 {
 	if (use_global_lock) {
 		locks = (pthread_mutex_t *) calloc(CRYPTO_num_locks(), sizeof(pthread_mutex_t));
@@ -171,7 +186,8 @@ void thread_setup()
 	}
 }
 /*----------------------------------------------------------------------------*/
-void thread_cleanup()
+void
+thread_cleanup()
 {
 	if (use_global_lock) {
 		for (int i = 0; i < CRYPTO_num_locks(); i++) {
@@ -184,20 +200,23 @@ void thread_cleanup()
 	}
 }
 /*----------------------------------------------------------------------------*/
-void init_openssl()
+void
+init_openssl()
 {
 	SSL_load_error_strings();
 	OpenSSL_add_ssl_algorithms();
 	thread_setup();
 }
 /*----------------------------------------------------------------------------*/
-void cleanup_openssl()
+void
+cleanup_openssl()
 {
 	thread_cleanup();
 	EVP_cleanup();
 }
 /*----------------------------------------------------------------------------*/
-SSL_CTX *create_ssl_context()
+SSL_CTX *
+create_ssl_context()
 {
 	const SSL_METHOD *method;
 	SSL_CTX *ctx;
@@ -215,7 +234,8 @@ SSL_CTX *create_ssl_context()
 	return ctx;
 }
 /*----------------------------------------------------------------------------*/
-void configure_ssl_context(SSL_CTX *ctx)
+void
+configure_ssl_context(SSL_CTX *ctx)
 {
 	SSL_CTX_set_ecdh_auto(ctx, 1);
 	
@@ -231,7 +251,8 @@ void configure_ssl_context(SSL_CTX *ctx)
 	}
 }
 /*----------------------------------------------------------------------------*/
-static int my_sock_read(BIO *b, char *out, int outl)
+static int
+my_sock_read(BIO *b, char *out, int outl)
 {
 	int ret;
 	if (out != NULL) {
@@ -249,7 +270,8 @@ static int my_sock_read(BIO *b, char *out, int outl)
 	return (ret);
 }
 /*----------------------------------------------------------------------------*/
-static int my_sock_write(BIO *b, const char *in, int inl)
+static int
+my_sock_write(BIO *b, const char *in, int inl)
 {
 #ifndef USE_LINUX
 	int core = sched_getcpu();
@@ -332,7 +354,9 @@ create_listening_socket(int core, struct thread_context *ctx)
 
 #ifdef USE_LINUX
 		if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 }, sizeof(int)) < 0)
-			perror("setsockopt");
+			perror("setsockopt REUSEADDR");
+		if (setsockopt(listener, SOL_SOCKET, SO_REUSEPORT, &(int){ 1 }, sizeof(int)) < 0)
+			perror("setsockopt REUSEPORT");
 #endif
 		
 		struct sockaddr_in saddr;
@@ -420,18 +444,22 @@ send_messages(struct thread_context *ctx, int core, int sockid)
 #endif
 		
 		if (ret < 0) {
-			fprintf(stderr, "[CPU %d] Failed to write to socket %d\n",
-					  core, sockid);
+			if (errno != EAGAIN) {
+				fprintf(stderr, "[CPU %d] Failed to write to socket %d\n",
+						  core, sockid);
+			}
 			break;
 		}
 		
 		if (ret == len) {
 			conn->msg_pos = 0;
 			conn->msgs_sent++;
+			ctx->msgs_sent++;
 			} else {
 			conn->msg_pos += ret;
 		}
 		sent += ret;
+		ctx->bytes_sent += ret;
 	}
 
 	if (conn->msgs_sent == msgs_per_conn) {
@@ -495,6 +523,9 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 		}
 		return c;
 	}
+
+	ctx->connects++;
+	
 	return 1;
 }
 /*----------------------------------------------------------------------------*/
@@ -588,7 +619,17 @@ run_server_thread(void *args)
 		exit(EXIT_FAILURE);
 	}
 
+	struct timeval curr_tv, prev_tv;
+	gettimeofday(&prev_tv, NULL);
+
 	while (1) {
+
+	   gettimeofday(&curr_tv, NULL);
+		if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
+			print_interval_stats(ctx, core);
+			prev_tv = curr_tv;
+		}
+		
 		int nevents = SOCKET_FUNC(epoll_wait, core, ctx->ep, events,
 										  MAX_EVENTS, -1);
 		if (nevents < 0) {
@@ -660,16 +701,14 @@ run_server_thread(void *args)
 void
 signal_handler(int signum)
 {
-	// Kill all other application threads
-	for (int i = 0; i < core_limit; i++) {
-		if (app_thread[i] != pthread_self()) {
+	if (pthread_self() != main_thread) {
+		// If application thread, pass signal to main thread
+		pthread_kill(main_thread, signum);
+	} else {
+		// Otherwise, kill all application threads
+		for (int i = 0; i < core_limit; i++) {
 			pthread_kill(app_thread[i], signum);
 		}
-	}
-
-	// If self is an application thread, kill self
-	if (pthread_self() != main_thread) {
-		pthread_exit(NULL);
 	}
 }
 /*----------------------------------------------------------------------------*/
@@ -680,11 +719,8 @@ main(int argc, char **argv)
 	int num_cores = GetNumCPUs();
 	core_limit = num_cores;
 	payload_size = -1;
-
-#ifndef USE_LINUX
-	struct mtcp_conf mcfg;
-#endif
-
+	main_thread = pthread_self();
+	
 	int o;
 	while (-1 != (o = getopt(argc, argv, "N:f:c:b:s:k:p:l:h"))) {
 		switch (o) {
@@ -707,6 +743,7 @@ main(int argc, char **argv)
 						  "limit\n");
 				return EXIT_FAILURE;
 			}
+			core_limit = process_cpu; // Ensures we only spawn one thread
 		case 'b':
 			backlog = mystrtol(optarg, 10);
 			break;
@@ -757,6 +794,7 @@ main(int argc, char **argv)
 	}
 
 #ifndef USE_LINUX
+	struct mtcp_conf mcfg;
 	mtcp_getconf(&mcfg);
 	mcfg.num_cores = core_limit;
 	mtcp_setconf(&mcfg);
@@ -779,24 +817,20 @@ main(int argc, char **argv)
 	init_openssl();
 #endif
 
-	if (core_limit > 1 && process_cpu == -1) {
-		// Spawn listener threads
-		for (int i = 0; i < core_limit; i++) {
-			cores[i] = i;
-
-			if (pthread_create(&app_thread[i], NULL,
-									 run_server_thread, (void *) &cores[i])) {
-				perror("pthread_create");
-				abort();
-			}
+	// Spawn listener threads
+	int starting_core = (process_cpu == -1) ? 0 : process_cpu;
+	for (int i = starting_core; i < core_limit; i++) {
+		cores[i] = i;
+		
+		if (pthread_create(&app_thread[i], NULL,
+								 run_server_thread, (void *) &cores[i])) {
+			perror("pthread_create");
+			abort();
 		}
+	}
 
-		for (int i = 0; i < core_limit; i++) {
-			pthread_join(app_thread[i], NULL);
-		}
-	} else {
-		cores[0] = 0;
-		run_server_thread((void *) &cores[0]);
+	for (int i = starting_core; i < core_limit; i++) {
+		pthread_join(app_thread[i], NULL);
 	}
 
 #ifdef USE_SSL
