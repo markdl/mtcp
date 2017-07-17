@@ -1,3 +1,4 @@
+
 /*
  * Continuously open up to -m concurrent connections with the given host:port
  * and verify the contents of the -k messages of size -s received from the
@@ -22,9 +23,24 @@
 #include <sys/queue.h>
 #include <assert.h>
 #include <limits.h>
+#include <sys/time.h>
+
+#ifdef USE_SSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
+
+#ifndef USE_LINUX
 
 #include <mtcp_api.h>
 #include <mtcp_epoll.h>
+
+#else
+
+#include <sys/epoll.h>
+
+#endif
+
 #include "cpu.h"
 #include "rss.h"
 #include "http_parsing.h"
@@ -33,6 +49,8 @@
 
 /*----------------------------------------------------------------------------*/
 #define MAX_CPUS 32
+#define MAX_FLOW_NUM 65535
+#define MAX_EVENTS (MAX_FLOW_NUM * 3)
 #define BUF_SIZE (8 * 1024)
 #define IP_RANGE 1
 /*----------------------------------------------------------------------------*/
@@ -196,7 +214,7 @@ create_connection(struct thread_context *ctx)
 {
 	int sockid = SOCKET_FUNC(socket, ctx->core, AF_INET, SOCK_STREAM, 0);
 	if (sockid < 0) {
-		fprintf(stderr, "Failed to create socket\n");
+		perror("socket");
 		return -1;
 	}
 	clean_connection(&ctx->connections[sockid]);
@@ -205,6 +223,11 @@ create_connection(struct thread_context *ctx)
 		fprintf(stderr, "Failed to set socket to nonblocking\n");
 		exit(EXIT_FAILURE);
 	}
+
+#ifdef USE_LINUX
+	if (setsockopt(sockid, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 }, sizeof(int)) < 0)
+		perror("setsockopt REUSEADDR");
+#endif
 
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
@@ -250,6 +273,7 @@ close_connection(struct thread_context *ctx, int sockid)
 #endif
 
 	SOCKET_FUNC(close, ctx->core, sockid);
+	ctx->pending--;
 	while (ctx->pending < concurrency) {
 		if (create_connection(ctx) < 0) {
 			break;
@@ -261,7 +285,6 @@ static inline int
 download_complete(struct thread_context *ctx, int sockid,
 						struct connection *conn)
 {	
-	close_connection(ctx, sockid);
 	if (conn->msgs_rcvd != msgs_per_conn) {
 		ctx->incompletes++;
 		ctx->errors++;
@@ -276,6 +299,8 @@ download_complete(struct thread_context *ctx, int sockid,
 	ctx->stats.sum_resp_time += tdiff;
 	if (tdiff > ctx->stats.max_resp_time)
 		ctx->stats.max_resp_time = tdiff;
+
+	close_connection(ctx, sockid);
 
 	return 0;
 }
@@ -305,7 +330,7 @@ handle_read_event(struct thread_context *ctx, int sockid)
 				conn->content_error++;
 				ctx->errors++;
 			}
-			if (conn->msg_pos > msg_size) {
+			if (conn->msg_pos >= msg_size) {
 				conn->msgs_rcvd++;
 				conn->msg_pos = 0;
 			}
@@ -324,16 +349,28 @@ handle_read_event(struct thread_context *ctx, int sockid)
 }
 /*----------------------------------------------------------------------------*/
 void
+print_running_stats(struct thread_context *ctx)
+{
+	printf("[CPU %d] Running Stats - Completes: %lu, Incompletes: %lu, "
+			 "Started: %lu, Pending: %lu, Timeouts: %lu, Errors: %lu "
+			 "(content: %lu, length: %lu)\n",
+			 ctx->core, ctx->completes, ctx->incompletes, ctx->started,
+			 ctx->pending, ctx->timeouts, ctx->errors, ctx->content_errors,
+			 ctx->length_errors);
+	fflush(stdout);
+}
+/*----------------------------------------------------------------------------*/
+void
 print_interval_stats(struct thread_context *ctx)
 {
 	double tp = (ctx->stats.bytes_rcvd * 8.0) / 1024 / 1024 / 1024;
 	double arp = 0.0;
 	if (ctx->stats.resp_entries > 0)
 		arp = (ctx->stats.sum_resp_time / (double) ctx->stats.resp_entries);
-	fprintf(stderr, "[CPU %d] Interval Stats - M/s: %lu, Tp: %.2f Gbps, "
-			  "Cnxs: %lu, Avg Resp Time: %.2f (us), Max Resp Time: %lu\n",
-			  ctx->core, ctx->stats.msgs_rcvd, tp, ctx->stats.connects,
-			  arp, ctx->stats.max_resp_time);
+	printf("[CPU %d] Interval Stats - M/s: %lu, Tp: %.2f Gbps, "
+			 "Cnxs: %lu, Avg Resp Time: %.2f (us), Max Resp Time: %lu (us)\n",
+			 ctx->core, ctx->stats.msgs_rcvd, tp, ctx->stats.connects,
+			 arp, ctx->stats.max_resp_time);
 	clean_interval_stats(&ctx->stats);
 }
 /*----------------------------------------------------------------------------*/
@@ -373,7 +410,7 @@ run_client_thread(void *args)
 	}
 
 	ctx->connections = (struct connection *)
-		calloc(max_fds, sizeof(struct connection));
+		calloc(MAX_FLOW_NUM, sizeof(struct connection));
 	if (ctx->connections == NULL) {
 		perror("connections calloc");
 		exit(EXIT_FAILURE);
@@ -381,12 +418,15 @@ run_client_thread(void *args)
 
 	struct timeval curr_tv, prev_tv;
 	gettimeofday(&prev_tv, NULL);
+
+	printf("[CPU %d] Launching client\n", core);
 	
 	while (1) {
 		
 		gettimeofday(&curr_tv, NULL);
 		if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
 			print_interval_stats(ctx);
+			print_running_stats(ctx);
 			prev_tv = curr_tv;
 		}
 
@@ -433,8 +473,6 @@ run_client_thread(void *args)
 
 #ifdef USE_SSL
 				do_ssl_handshake(ctx, efd);
-#else
-				fprintf(stderr, "EPOLLOUT event occurred but SSL is disabled\n");
 #endif
 				
 			}
@@ -463,7 +501,11 @@ main(int argc, char **argv)
 {
 	int process_cpu = -1;
 	int num_cores = GetNumCPUs();
+
+#ifndef USE_LINUX
 	char *conf_file = "mtcp.conf";
+#endif
+
 	core_limit = num_cores;
 	main_thread = pthread_self();
 	msgs_per_conn = 0;
@@ -479,6 +521,7 @@ main(int argc, char **argv)
 						  "of CPUs: %d\n", num_cores);
 				return EXIT_FAILURE;
 			}
+			break;
 #ifndef USE_LINUX
 		case 'f': // MTCP configuration file
 			conf_file = optarg;
@@ -491,6 +534,7 @@ main(int argc, char **argv)
 						  "limit\n");
 				return EXIT_FAILURE;
 			}
+			break;
 		case 's':
 			msg_size = mystrtol(optarg, 10);
 			if (msg_size <= 0) {
@@ -510,6 +554,7 @@ main(int argc, char **argv)
 #else
 			fprintf(stderr, "SSL is not enabled\n");
 #endif
+			break;
 		case 'h':
 			printf("Usage: %s max_concurrency host port "
 					 "[-f <mtcp_conf_file>] "
@@ -543,7 +588,7 @@ main(int argc, char **argv)
 			if (c >= 91)
 				c = 65;
 		}
-		fprintf(stderr, "Message being sent: %s\n", msg);
+		fprintf(stderr, "Message being received: %s\n", msg);
 	}
 
 #ifndef USE_LINUX
@@ -569,24 +614,20 @@ main(int argc, char **argv)
 #endif
 
 	int cores[MAX_CPUS];
-	if (core_limit > 1 && process_cpu == -1) {
-		// Spawn client threads
-		for (int i = 0; i < core_limit; i++) {
-			cores[i] = i;
-
-			if (pthread_create(&app_thread[i], NULL,
-									 run_client_thread, (void *) &cores[i])) {
-				perror("pthread_create");
-				abort();
-			}
+	int starting_core = (process_cpu == -1) ? 0 : process_cpu;
+	// Spawn client threads
+	for (int i = starting_core; i < core_limit; i++) {
+		cores[i] = i;
+		
+		if (pthread_create(&app_thread[i], NULL,
+								 run_client_thread, (void *) &cores[i])) {
+			perror("pthread_create");
+			abort();
 		}
+	}
 
-		for (int i = 0; i < core_limit; i++) {
-			pthread_join(app_thread[i], NULL);
-		}
-	} else {
-		cores[0] = 0;
-		run_client_thread((void *) &cores[0]);
+	for (int i = starting_core; i < core_limit; i++) {
+		pthread_join(app_thread[i], NULL);
 	}
 
 #ifdef USE_SSL
@@ -595,8 +636,6 @@ main(int argc, char **argv)
 
 #ifndef USE_LINUX
 	mtcp_destroy();
-#else
-	close(linux_listener);
 #endif
 
 	if (msg != NULL)
