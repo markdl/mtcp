@@ -19,14 +19,18 @@
 #include <dirent.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include <pthread.h>
 #include <signal.h>
 #include <limits.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+
+#ifdef USE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#endif
 
 #include <sched.h>
 
@@ -124,14 +128,19 @@ static pthread_mutex_t *locks;
 #endif
 /*----------------------------------------------------------------------------*/
 void
-print_interval_stats(struct thread_context *ctx, int core)
+print_interval_stats(struct thread_context *ctx, int core,
+							struct timeval start, struct timeval end)
 {
+	double seconds = (end.tv_sec - start.tv_sec) +
+		((end.tv_usec - start.tv_usec) / 1000000.0);
 	double tp = (ctx->bytes_sent * 8.0) / 1024 / 1024 / 1024;
-	fprintf(stderr, "[CPU %d] Interval stats - M/s: %lu, Tp: %.2f Gbps, "
-			  "Cnx/s: %lu\n", core, ctx->msgs_sent, tp, ctx->connects);
+	printf("[CPU %d] Interval stats - M/s: %.2f, Tp: %.2f Gbps, Cnx/s: %.2f\n",
+			 core, ctx->msgs_sent / seconds, tp / seconds,
+			 ctx->connects / seconds);
 	ctx->msgs_sent = 0;
 	ctx->bytes_sent = 0;
 	ctx->connects = 0;
+	fflush(stdout);
 }
 /*----------------------------------------------------------------------------*/
 int
@@ -333,50 +342,60 @@ create_listening_socket(int core, struct thread_context *ctx)
 {
 	int listener;
 	int ret;
+	int create_socket = TRUE;
 	
 #ifdef USE_LINUX
 	pthread_mutex_lock(&startup_lock);
-	if (linux_listener == -1)
+	if (linux_listener != -1) {
+		pthread_mutex_unlock(&startup_lock);
+		listener = linux_listener;
+		create_socket = FALSE;
+	}
 #endif
 
-	{
+	if (create_socket) {
 		listener = SOCKET_FUNC(socket, core, AF_INET, SOCK_STREAM, 0);
 		if (listener < 0) {
 			perror("socket");
 			listener = -1;
-		}
+		} else {
 
-		ret = SOCKET_FUNC(setsock_nonblock, core, listener);
-		if (ret < 0) {
-			fprintf(stderr, "Failed setting socket to nonblocking\n");
-			listener = -1;
-		}
+			ret = SOCKET_FUNC(setsock_nonblock, core, listener);
+			if (ret < 0) {
+				fprintf(stderr, "Failed setting socket to nonblocking\n");
+				listener = -1;
+			} else {
 
 #ifdef USE_LINUX
-		if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 }, sizeof(int)) < 0)
-			perror("setsockopt REUSEADDR");
-		if (setsockopt(listener, SOL_SOCKET, SO_REUSEPORT, &(int){ 1 }, sizeof(int)) < 0)
-			perror("setsockopt REUSEPORT");
+				if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 },
+									sizeof(int)) < 0)
+					perror("setsockopt REUSEADDR");
+				if (setsockopt(listener, SOL_SOCKET, SO_REUSEPORT, &(int){ 1 },
+									sizeof(int)) < 0)
+					perror("setsockopt REUSEPORT");
 #endif
-		
-		struct sockaddr_in saddr;
-		saddr.sin_family = AF_INET;
-		saddr.sin_addr.s_addr = INADDR_ANY;
-		saddr.sin_port = htons(port);
-
-		ret = SOCKET_FUNC(bind, core, listener,
-								(struct sockaddr *) &saddr,
-								sizeof(struct sockaddr_in));
-		if (ret < 0) {
-			perror("bind");
-			listener = -1;
+				
+				struct sockaddr_in saddr;
+				saddr.sin_family = AF_INET;
+				saddr.sin_addr.s_addr = INADDR_ANY;
+				saddr.sin_port = htons(port);
+			
+				ret = SOCKET_FUNC(bind, core, listener,
+										(struct sockaddr *) &saddr,
+										sizeof(struct sockaddr_in));
+				if (ret < 0) {
+					perror("bind");
+				listener = -1;
+				}
+			}
 		}
-
 	}
 	
 #ifdef USE_LINUX
-	pthread_mutex_unlock(&startup_lock);
-	linux_listener = listener;
+	if (create_socket) {
+		linux_listener = listener;
+		pthread_mutex_unlock(&startup_lock);
+	}
 #endif
 
 	if (listener < 0)
@@ -385,6 +404,8 @@ create_listening_socket(int core, struct thread_context *ctx)
 	ret = SOCKET_FUNC(listen, core, listener, backlog);
 	if (ret < 0) {
 		perror("listen");
+		fprintf(stderr, "[CPU %d] Listen failed. Listener: %d, backlog: %d\n",
+				  core, listener, backlog);
 		return -1;
 	}
 
@@ -487,10 +508,12 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 	int c = SOCKET_FUNC(accept, core, listener, NULL, NULL);
 	if (c >= 0) {
 
+		/*
 		if (c >= MAX_FLOW_NUM) {
 			fprintf(stderr, "Invalid socket id %d\n", c);
 			return -1;
 		}
+		*/
 
 		struct connection *conn = &ctx->connections[c];
 		clean_connection(conn);
@@ -626,7 +649,7 @@ run_server_thread(void *args)
 
 	   gettimeofday(&curr_tv, NULL);
 		if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
-			print_interval_stats(ctx, core);
+			print_interval_stats(ctx, core, prev_tv, curr_tv);
 			prev_tv = curr_tv;
 		}
 		
@@ -771,6 +794,7 @@ main(int argc, char **argv)
 #else
 			fprintf(stderr, "SSL is not enabled\n");
 #endif
+			break;
 		case 'h':
 			printf("Usage: %s [-f <mtcp_conf_file>] [-b backlog_size] "
 					 "[-s <msg size>] [-k <msgs per connection>] "
