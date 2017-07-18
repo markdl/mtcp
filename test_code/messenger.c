@@ -53,10 +53,10 @@
 #include "hashmap.h"
 
 /*----------------------------------------------------------------------------*/
+#define FD_OVERHEAD_FACTOR 3
+#define MAX_EVENTS_FACTOR 3 // Not sure if these values are related
+/*----------------------------------------------------------------------------*/
 #define MAX_CPUS 32
-#define MAX_FLOW_NUM 65535
-#define MAX_EVENTS (MAX_FLOW_NUM * 3)
-#define SNDBUF_SIZE (8*1024)
 /*----------------------------------------------------------------------------*/
 #ifndef USE_LINUX
 
@@ -102,6 +102,8 @@ struct thread_context {
 /*----------------------------------------------------------------------------*/
 static int port = 8080;
 static int backlog = 4096;
+static int sndbuf_size;
+static int max_fds;
 static char *msg = NULL;
 static int msgs_per_conn = 0;
 static int payload_size;
@@ -309,7 +311,7 @@ init_server_thread(int core, struct thread_context *ctx) {
 	}
 #endif
 
-	ctx->ep = SOCKET_FUNC(epoll_create, core, MAX_EVENTS);
+	ctx->ep = SOCKET_FUNC(epoll_create, core, max_fds * MAX_EVENTS_FACTOR);
 	if (ctx->ep < 0) {
 		perror("epoll_create");
 #ifndef USE_LINUX
@@ -318,8 +320,8 @@ init_server_thread(int core, struct thread_context *ctx) {
 		return -1;
 	}
 	
-	ctx->connections = (struct connection *) calloc(MAX_FLOW_NUM,
-																	sizeof(struct connection));
+	ctx->connections = (struct connection *)
+		calloc(max_fds * FD_OVERHEAD_FACTOR, sizeof(struct connection));
 	if (ctx->connections == NULL) {
 		perror("connections calloc");
 		SOCKET_FUNC(close, core, ctx->ep);
@@ -453,7 +455,7 @@ send_messages(struct thread_context *ctx, int core, int sockid)
 	int sent = 0;
 	int ret = 1;
 	while (conn->msgs_sent < msgs_per_conn && ret > 0) {
-		int len = MIN(SNDBUF_SIZE, payload_size - conn->msg_pos);
+		int len = MIN(sndbuf_size, payload_size - conn->msg_pos);
 		if (len <= 0) {
 			break;
 		}
@@ -508,12 +510,10 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 	int c = SOCKET_FUNC(accept, core, listener, NULL, NULL);
 	if (c >= 0) {
 
-		/*
-		if (c >= MAX_FLOW_NUM) {
+		if (c >= max_fds * FD_OVERHEAD_FACTOR) {
 			fprintf(stderr, "Invalid socket id %d\n", c);
 			return -1;
 		}
-		*/
 
 		struct connection *conn = &ctx->connections[c];
 		clean_connection(conn);
@@ -626,10 +626,10 @@ run_server_thread(void *args)
 
 #ifndef USE_LINUX
 	struct mtcp_epoll_event *events = (struct mtcp_epoll_event *)
-		calloc(MAX_EVENTS, sizeof(struct mtcp_epoll_event));
+		calloc(max_fds * MAX_EVENTS_FACTOR, sizeof(struct mtcp_epoll_event));
 #else
 	struct epoll_event *events = (struct epoll_event *)
-		calloc(MAX_EVENTS, sizeof(struct epoll_event));
+		calloc(max_fds * MAX_EVENTS_FACTOR, sizeof(struct epoll_event));
 #endif
 	if (!events) {
 		fprintf(stderr, "Failed to create events struct\n");
@@ -654,7 +654,7 @@ run_server_thread(void *args)
 		}
 		
 		int nevents = SOCKET_FUNC(epoll_wait, core, ctx->ep, events,
-										  MAX_EVENTS, -1);
+										  max_fds * MAX_EVENTS_FACTOR, -1);
 		if (nevents < 0) {
 			if (errno != EINTR)
 				perror("epoll_wait");
@@ -835,6 +835,8 @@ main(int argc, char **argv)
 		fprintf(stderr, "Backlog cannot be larger than CONFIG.max_concurrency\n");
 		return EXIT_FAILURE;
 	}
+	sndbuf_size = mcfg.sndbuf_size;
+	max_fds = mcfg.max_concurrency / core_limit;
 
 	mtcp_register_signal(SIGINT, signal_handler);
 #endif

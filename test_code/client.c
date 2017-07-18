@@ -1,8 +1,8 @@
 
 /*
- * Continuously open up to -m concurrent connections with the given host:port
- * and verify the contents of the -k messages of size -s received from the
- * host.
+ * Continuously maintain the given max_concurrency concurrent connections
+ * with the given host:port and verify the contents of the -k messages of
+ * size -s received from the host.
  */
 
 #include <stdio.h>
@@ -47,12 +47,18 @@
 #include "netlib.h"
 #include "debug.h"
 
+/*----------------------------------------------------------------------------*
+ * FD_OVERHEAD_FACTOR was a magic number in the epwget example that I extracted
+ * into this macro. I believe this is used to delay a potential race condition
+ * in the client code that occurs when a new connection is created because
+ * max_concurrency is not reached yet, but there are resources from a prior
+ * closed connection that has not been released yet.
+ *----------------------------------------------------------------------------*/
+#define FD_OVERHEAD_FACTOR 3
 /*----------------------------------------------------------------------------*/
 #define MAX_CPUS 32
-#define MAX_FLOW_NUM 65535
-#define MAX_EVENTS (MAX_FLOW_NUM * 3)
 #define BUF_SIZE (8 * 1024)
-#define IP_RANGE 1
+#define IP_RANGE 10
 /*----------------------------------------------------------------------------*/
 #ifndef USE_LINUX
 
@@ -378,7 +384,7 @@ void *
 run_client_thread(void *args)
 {
 	int core = *(int *) args;
-	int maxevents = max_fds * 3;
+	int maxevents = max_fds * FD_OVERHEAD_FACTOR;
 	struct thread_context *ctx = &contexts[core];
 
 #ifndef USE_LINUX
@@ -410,7 +416,7 @@ run_client_thread(void *args)
 	}
 
 	ctx->connections = (struct connection *)
-		calloc(MAX_FLOW_NUM, sizeof(struct connection));
+		calloc(max_fds * FD_OVERHEAD_FACTOR, sizeof(struct connection));
 	if (ctx->connections == NULL) {
 		perror("connections calloc");
 		exit(EXIT_FAILURE);
