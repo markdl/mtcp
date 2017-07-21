@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ssl_functions.h>
 
 #include <sched.h>
 
@@ -52,7 +53,6 @@
 #define HTTP_HEADER_LEN 1024
 #define URL_LEN 128
 
-#define MAX_CPUS 16
 #define MAX_FILES 30
 
 #define NAME_LIMIT 128
@@ -132,7 +132,6 @@ static int nfiles;
 /*----------------------------------------------------------------------------*/
 static int finished;
 /*----------------------------------------------------------------------------*/
-static pthread_mutex_t *locks;
 #ifdef USE_LINUX
 static pthread_mutex_t startup_lock;
 #endif
@@ -148,139 +147,6 @@ int set_nonblocking(int fd) {
 		return -1;
 	}
 	return 0;
-}
-/*----------------------------------------------------------------------------*/
-void thread_locking(int mode, int n, const char* file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-		pthread_mutex_lock(&locks[n]);
-	else
-		pthread_mutex_unlock(&locks[n]);
-}
-/*----------------------------------------------------------------------------*/
-unsigned long thread_id()
-{
-	return (unsigned long) pthread_self();
-}
-/*----------------------------------------------------------------------------*/
-void thread_setup()
-{
-	if (use_lock) {
-		locks = (pthread_mutex_t *) calloc(CRYPTO_num_locks(), sizeof(pthread_mutex_t));
-		if (!locks) {
-			perror("locks calloc");
-			abort();
-		}
-		for (int i = 0; i < CRYPTO_num_locks(); i++) {
-			if (pthread_mutex_init(&locks[i], NULL) != 0) {
-				perror("pthread_mutex_init");
-				abort();
-			}
-		}
-
-		CRYPTO_set_id_callback(thread_id);
-		CRYPTO_set_locking_callback(thread_locking);
-	}
-}
-/*----------------------------------------------------------------------------*/
-void thread_cleanup()
-{
-	if (use_lock) {
-		for (int i = 0; i < CRYPTO_num_locks(); i++) {
-			pthread_mutex_destroy(&locks[i]);
-		}
-		free(locks);
-		
-		CRYPTO_set_id_callback(NULL);
-		CRYPTO_set_locking_callback(NULL);
-	}
-}
-/*----------------------------------------------------------------------------*/
-void init_openssl()
-{
-	SSL_load_error_strings();
-	OpenSSL_add_ssl_algorithms();
-	thread_setup();
-}
-/*----------------------------------------------------------------------------*/
-void cleanup_openssl()
-{
-	thread_cleanup();
-	EVP_cleanup();
-}
-/*----------------------------------------------------------------------------*/
-SSL_CTX *create_context()
-{
-	const SSL_METHOD *method;
-	SSL_CTX *ctx;
-	
-	method = SSLv23_server_method();
-	
-	ctx = SSL_CTX_new(method);
-	if (!ctx) {
-		perror("Unable to create SSL context");
-		ERR_print_errors_fp(stderr);
-		abort();
-	}
-	SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
-	
-	return ctx;
-}
-/*----------------------------------------------------------------------------*/
-void configure_context(SSL_CTX *ctx)
-{
-	SSL_CTX_set_ecdh_auto(ctx, 1);
-	
-	/* Set the key and cert */
-	if (SSL_CTX_use_certificate_file(ctx, "credentials/cert.pem", SSL_FILETYPE_PEM) <= 0) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
-	
-	if (SSL_CTX_use_PrivateKey_file(ctx, "credentials/key.pem", SSL_FILETYPE_PEM) <= 0 ) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
-}
-/*----------------------------------------------------------------------------*/
-static int my_sock_read(BIO *b, char *out, int outl)
-{
-	int ret = 0;
-
-	if (out != NULL) {
-		errno = 0;
-#ifndef USE_LINUX
-		int cpu = sched_getcpu();
-	   ret = mtcp_read(g_mctx[cpu], b->num, out, outl);
-#else
-		ret = read(b->num, out, outl);
-#endif
-		BIO_clear_retry_flags(b);
-		if (ret <= 0) {
-			if (BIO_sock_should_retry(ret))
-				BIO_set_retry_read(b);
-		}
-	}
-	return (ret);
-}
-/*----------------------------------------------------------------------------*/
-static int my_sock_write(BIO *b, const char *in, int inl)
-{
-	int ret;
-
-	errno = 0;
-#ifndef USE_LINUX
-	int cpu = sched_getcpu();
-	ret = mtcp_write(g_mctx[cpu], b->num, in, inl);
-#else
-	ret = write(b->num, in, inl);
-#endif
-	BIO_clear_retry_flags(b);
-	if (ret <= 0) {
-		if (BIO_sock_should_retry(ret))
-			BIO_set_retry_write(b);
-	}
-	return (ret);
 }
 /*----------------------------------------------------------------------------*/
 void
@@ -417,15 +283,7 @@ HandleReadEvent(struct thread_context *ctx, SSL_CTX *ssl_ctx, int sockid, struct
 		conn->accepted = 0;
 		
 		// Create the SSL object and override the read/write functions
-		conn->ssl = SSL_new(ssl_ctx);
-		SSL_set_fd(conn->ssl, sockid);
-		BIO *wbio = SSL_get_wbio(conn->ssl);
-		BIO *rbio = SSL_get_rbio(conn->ssl);
-		wbio->method->bwrite = my_sock_write;
-		rbio->method->bread = my_sock_read;
-		BIO_set_nbio(wbio, 1);
-		BIO_set_nbio(rbio, 1);
-		SSL_set_bio(conn->ssl, rbio, wbio);
+		conn->ssl = ssl_new_connection(ssl_ctx, sockid);
 
 		int *sid = (int *) malloc(sizeof(int));
 		*sid = sockid;
@@ -745,8 +603,12 @@ void *
 RunServerThread(void *arg)
 {
 	int core = *(int *)arg;
-	SSL_CTX *ssl_ctx = create_context();
-	configure_context(ssl_ctx);
+#ifndef USE_LINUX
+	SSL_CTX *ssl_ctx = create_ssl_context(g_mctx);
+#else
+	SSL_CTX *ssl_ctx = create_ssl_context();
+#endif
+	configure_ssl_context(ssl_ctx);
 	
 	/* initialization */
 	struct thread_context *ctx = InitializeServerThread(core);
@@ -1076,7 +938,7 @@ main(int argc, char **argv)
 		backlog = 4096;
 	}
 
-	init_openssl();
+	init_openssl(use_lock, CRYPTO_num_locks());
 
 	TRACE_INFO("Application initialization finished.\n");
 
@@ -1108,7 +970,7 @@ main(int argc, char **argv)
 		RunServerThread((void *) &cores[0]);
 	}
 
-	cleanup_openssl();
+	cleanup_openssl(use_lock, CRYPTO_num_locks());
 #ifndef USE_LINUX
 	mtcp_destroy();
 #endif

@@ -30,6 +30,7 @@
 #ifdef USE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ssl_functions.h>
 #endif
 
 #include <sched.h>
@@ -56,19 +57,21 @@
 #define FD_OVERHEAD_FACTOR 3
 #define MAX_EVENTS_FACTOR 3 // Not sure if these values are related
 /*----------------------------------------------------------------------------*/
-#define MAX_CPUS 32
-/*----------------------------------------------------------------------------*/
 #ifndef USE_LINUX
 
 #define FUNC_NAME_CONCAT(x, y) x ## y
-#define FUNC_NAME_CONCAT_HELPER(x, y) FUNC_NAME_CONCAT(x, y)
-#define SOCKET_FUNC(func, core, ...) FUNC_NAME_CONCAT_HELPER(mtcp_, func)(contexts[core].mctx, __VA_ARGS__)
+#define GET_SOCKET_FUNC(func) FUNC_NAME_CONCAT(mtcp_, func)
+
+#define SOCKET_FUNC(func, core, ...) GET_SOCKET_FUNC(func)(contexts[core].mctx, \
+																			  __VA_ARGS__)
 #define IS_EVENT_TYPE(event, type) event & MTCP_ ## type
+#define GET_SOCKET_FUNC_NAME(func) "mtcp_" #func
 
 #else
 
 #define SOCKET_FUNC(func, core, ...) func(__VA_ARGS__)
 #define IS_EVENT_TYPE(event, type) event & type
+#define GET_SOCKET_FUNC_NAME(func) #func
 
 #endif
 /*----------------------------------------------------------------------------*/
@@ -88,10 +91,6 @@ struct thread_context {
 	mctx_t mctx;
 #endif
 
-#ifdef USE_SSL
-	SSL_CTX *ssl_ctx;
-#endif
-
 	int ep;
 	uint64_t connects;
 	uint64_t msgs_sent;
@@ -102,31 +101,28 @@ struct thread_context {
 /*----------------------------------------------------------------------------*/
 static int port = 8080;
 static int backlog = 4096;
-static int sndbuf_size;
-static int max_fds;
+static int sndbuf_size = 8192; // Default for Linux
+static int max_fds = 65000;    // Default for Linux
 static char *msg = NULL;
 static int msgs_per_conn = 0;
 static int payload_size;
-static int cores[MAX_CPUS];
 static int core_limit;
+static pthread_t main_thread;
+static int cores[MAX_CPUS];
 static pthread_t app_thread[MAX_CPUS];
 static struct thread_context contexts[MAX_CPUS];
-static pthread_t main_thread;
 /*----------------------------------------------------------------------------*/
-#ifdef USE_LINUX
-
+#ifndef USE_LINUX
+static mctx_t g_mctx[MAX_CPUS];
+static char *conf_file = "mtcp.conf";
+#else
 static pthread_mutex_t startup_lock;
 static int linux_listener = -1;
-
-#else
-
-static char *conf_file = "mtcp.conf";
-
 #endif
-
+/*----------------------------------------------------------------------------*/
 #ifdef USE_SSL
+SSL_CTX *ssl_ctx;
 int use_global_lock = FALSE;
-static pthread_mutex_t *locks;
 #endif
 /*----------------------------------------------------------------------------*/
 void
@@ -135,7 +131,9 @@ print_interval_stats(struct thread_context *ctx, int core,
 {
 	double seconds = (end.tv_sec - start.tv_sec) +
 		((end.tv_usec - start.tv_usec) / 1000000.0);
-	double tp = (ctx->bytes_sent * 8.0) / 1024 / 1024 / 1024;
+	double tp = 0;
+	if (ctx->bytes_sent > 0)
+		tp = (ctx->bytes_sent * 8.0) / 1024 / 1024 / 1024;
 	printf("[CPU %d] Interval stats - M/s: %.2f, Tp: %.2f Gbps, Cnx/s: %.2f\n",
 			 core, ctx->msgs_sent / seconds, tp / seconds,
 			 ctx->connects / seconds);
@@ -160,145 +158,6 @@ setsock_nonblock(int fd)
 	return 0;
 }
 /*----------------------------------------------------------------------------*/
-#ifdef USE_SSL
-void
-thread_locking(int mode, int n, const char* file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-		pthread_mutex_lock(&locks[n]);
-	else
-		pthread_mutex_unlock(&locks[n]);
-}
-/*----------------------------------------------------------------------------*/
-unsigned long
-thread_id()
-{
-	return (unsigned long) pthread_self();
-}
-/*----------------------------------------------------------------------------*/
-void
-thread_setup()
-{
-	if (use_global_lock) {
-		locks = (pthread_mutex_t *) calloc(CRYPTO_num_locks(), sizeof(pthread_mutex_t));
-		if (!locks) {
-			perror("locks calloc");
-			abort();
-		}
-		for (int i = 0; i < CRYPTO_num_locks(); i++) {
-			if (pthread_mutex_init(&locks[i], NULL) != 0) {
-				perror("pthread_mutex_init");
-				abort();
-			}
-		}
-
-		CRYPTO_set_id_callback(thread_id);
-		CRYPTO_set_locking_callback(thread_locking);
-	}
-}
-/*----------------------------------------------------------------------------*/
-void
-thread_cleanup()
-{
-	if (use_global_lock) {
-		for (int i = 0; i < CRYPTO_num_locks(); i++) {
-			pthread_mutex_destroy(&locks[i]);
-		}
-		free(locks);
-		
-		CRYPTO_set_id_callback(NULL);
-		CRYPTO_set_locking_callback(NULL);
-	}
-}
-/*----------------------------------------------------------------------------*/
-void
-init_openssl()
-{
-	SSL_load_error_strings();
-	OpenSSL_add_ssl_algorithms();
-	thread_setup();
-}
-/*----------------------------------------------------------------------------*/
-void
-cleanup_openssl()
-{
-	thread_cleanup();
-	EVP_cleanup();
-}
-/*----------------------------------------------------------------------------*/
-SSL_CTX *
-create_ssl_context()
-{
-	const SSL_METHOD *method;
-	SSL_CTX *ctx;
-	
-	method = SSLv23_server_method();
-	
-	ctx = SSL_CTX_new(method);
-	if (!ctx) {
-		perror("Unable to create SSL context");
-		ERR_print_errors_fp(stderr);
-		abort();
-	}
-	SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
-	
-	return ctx;
-}
-/*----------------------------------------------------------------------------*/
-void
-configure_ssl_context(SSL_CTX *ctx)
-{
-	SSL_CTX_set_ecdh_auto(ctx, 1);
-	
-	/* Set the key and cert */
-	if (SSL_CTX_use_certificate_file(ctx, "credentials/cert.pem", SSL_FILETYPE_PEM) <= 0) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
-	
-	if (SSL_CTX_use_PrivateKey_file(ctx, "credentials/key.pem", SSL_FILETYPE_PEM) <= 0 ) {
-		ERR_print_errors_fp(stderr);
-		exit(EXIT_FAILURE);
-	}
-}
-/*----------------------------------------------------------------------------*/
-static int
-my_sock_read(BIO *b, char *out, int outl)
-{
-	int ret;
-	if (out != NULL) {
-#ifndef USE_LINUX
-		int core = sched_getcpu();
-#endif
-		errno = 0;
-		ret = SOCKET_FUNC(read, core, b->num, out, outl);
-		BIO_clear_retry_flags(b);
-		if (ret <= 0) {
-			if (BIO_sock_should_retry(ret))
-				BIO_set_retry_read(b);
-		}
-	}
-	return (ret);
-}
-/*----------------------------------------------------------------------------*/
-static int
-my_sock_write(BIO *b, const char *in, int inl)
-{
-#ifndef USE_LINUX
-	int core = sched_getcpu();
-#endif
-	errno = 0;
-
-	int ret = SOCKET_FUNC(write, core, b->num, in, inl);
-	BIO_clear_retry_flags(b);
-	if (ret <= 0) {
-		if (BIO_sock_should_retry(ret))
-			BIO_set_retry_write(b);
-	}
-	return (ret);
-}
-#endif // #ifdef USE_SSL
-/*----------------------------------------------------------------------------*/
 int
 init_server_thread(int core, struct thread_context *ctx) {
 #ifndef USE_LINUX
@@ -309,11 +168,13 @@ init_server_thread(int core, struct thread_context *ctx) {
 		fprintf(stderr, "Failed to create mtcp context\n");
 		return -1;
 	}
+	g_mctx[core] = ctx->mctx;
 #endif
 
 	ctx->ep = SOCKET_FUNC(epoll_create, core, max_fds * MAX_EVENTS_FACTOR);
 	if (ctx->ep < 0) {
-		perror("epoll_create");
+		perror(GET_SOCKET_FUNC_NAME(epoll_create));
+		fprintf(stderr, "Failed to create epoll with %d events\n", max_fds * MAX_EVENTS_FACTOR);
 #ifndef USE_LINUX
 		mtcp_destroy_context(ctx->mctx);
 #endif
@@ -331,11 +192,6 @@ init_server_thread(int core, struct thread_context *ctx) {
 		return -1;
 	}
 	
-#ifdef USE_SSL
-	ctx->ssl_ctx = create_ssl_context();
-	configure_ssl_context(ctx->ssl_ctx);
-#endif
-
 	return 1;
 }
 /*----------------------------------------------------------------------------*/
@@ -358,7 +214,7 @@ create_listening_socket(int core, struct thread_context *ctx)
 	if (create_socket) {
 		listener = SOCKET_FUNC(socket, core, AF_INET, SOCK_STREAM, 0);
 		if (listener < 0) {
-			perror("socket");
+			perror(GET_SOCKET_FUNC_NAME(socket));
 			listener = -1;
 		} else {
 
@@ -386,7 +242,7 @@ create_listening_socket(int core, struct thread_context *ctx)
 										(struct sockaddr *) &saddr,
 										sizeof(struct sockaddr_in));
 				if (ret < 0) {
-					perror("bind");
+					perror(GET_SOCKET_FUNC_NAME(bind));
 				listener = -1;
 				}
 			}
@@ -405,7 +261,7 @@ create_listening_socket(int core, struct thread_context *ctx)
 
 	ret = SOCKET_FUNC(listen, core, listener, backlog);
 	if (ret < 0) {
-		perror("listen");
+		perror(GET_SOCKET_FUNC_NAME(listen));
 		fprintf(stderr, "[CPU %d] Listen failed. Listener: %d, backlog: %d\n",
 				  core, listener, backlog);
 		return -1;
@@ -421,7 +277,7 @@ create_listening_socket(int core, struct thread_context *ctx)
 	ev.events = EPOLLIN | EPOLLET;
 	ev.data.fd = listener;
 	if (epoll_ctl(ctx->ep, EPOLL_CTL_ADD, listener, &ev) == -1) {
-		perror("epoll_ctl");
+		perror(GET_SOCKET_FUNC_NAME(epoll_ctl));
 		abort();
 	}
 #endif
@@ -440,8 +296,7 @@ close_connection(struct thread_context *ctx, int core, int sockid)
 	
 #ifdef USE_SSL
 	struct connection conn = ctx->connections[sockid];
-	SSL_free(conn.
-				ssl);
+	SSL_free(conn.ssl);
 #endif
 
 	SOCKET_FUNC(close, core, sockid);
@@ -510,10 +365,12 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 	int c = SOCKET_FUNC(accept, core, listener, NULL, NULL);
 	if (c >= 0) {
 
+#ifndef USE_LINUX
 		if (c >= max_fds * FD_OVERHEAD_FACTOR) {
 			fprintf(stderr, "Invalid socket id %d\n", c);
 			return -1;
 		}
+#endif
 
 		struct connection *conn = &ctx->connections[c];
 		clean_connection(conn);
@@ -536,13 +393,13 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 		ret = epoll_ctl(ctx->ep, EPOLL_CTL_ADD, c, &ev);
 #endif
 		if (ret < 0) {
-			perror("epoll_ctl");
+			perror(GET_SOCKET_FUNC_NAME(epoll_ctl));
 			abort();
 		}
 		
 	} else {
 		if (errno != EAGAIN) {
-			perror("accept");
+			perror(GET_SOCKET_FUNC_NAME(accept));
 		}
 		return c;
 	}
@@ -563,15 +420,7 @@ handle_read_event(struct thread_context *ctx, int core, int sockid)
 	struct connection conn = ctx->connections[sockid];
 	if (conn.ssl == NULL) {
 		conn.accepted = 0;
-		conn.ssl = SSL_new(ctx->ssl_ctx);
-		SSL_set_fd(conn.ssl, sockid);
-		BIO *wbio = SSL_get_wbio(conn.ssl);
-		BIO *rbio = SSL_get_rbio(conn.ssl);
-		wbio->method->bwrite = my_sock_write;
-		rbio->method->bread = my_sock_read;
-		BIO_set_nbio(wbio, 1);
-		BIO_set_nbio(rbio, 1);
-		SSL_set_bio(conn.ssl, rbio, wbio);
+		conn.ssl = ssl_new_connection(ssl_ctx, sockid);
 	}
 	
 	if (!conn.accepted) {
@@ -581,6 +430,7 @@ handle_read_event(struct thread_context *ctx, int core, int sockid)
 			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
 				return 1;
 			}
+			
 			ERR_print_errors_fp(stderr);
 			fprintf(stderr, "Socket %d: SSL handshake failed\n", sockid);
 			return -2;
@@ -604,7 +454,7 @@ handle_read_event(struct thread_context *ctx, int core, int sockid)
 	int ret = epoll_ctl(ctx->ep, EPOLL_CTL_MOD, sockid, &ev);
 #endif
 	if (ret < 0) {
-		perror("epoll_ctl");
+		perror(GET_SOCKET_FUNC_NAME(epoll_ctl));
 		abort();
 	}
 
@@ -657,7 +507,7 @@ run_server_thread(void *args)
 										  max_fds * MAX_EVENTS_FACTOR, -1);
 		if (nevents < 0) {
 			if (errno != EINTR)
-				perror("epoll_wait");
+				perror(GET_SOCKET_FUNC_NAME(epoll_wait));
 			break;
 		}
 
@@ -684,7 +534,7 @@ run_server_thread(void *args)
 								  core, efd, strerror(err));
 					}
 				} else {
-					perror("mtcp_getsockopt");
+					perror(GET_SOCKET_FUNC_NAME(getsockopt));
 				}
 				close_connection(ctx, core, efd);
 				
@@ -745,7 +595,7 @@ main(int argc, char **argv)
 	main_thread = pthread_self();
 	
 	int o;
-	while (-1 != (o = getopt(argc, argv, "N:f:c:b:s:k:p:l:h"))) {
+	while (-1 != (o = getopt(argc, argv, "N:f:c:b:s:k:p:lh"))) {
 		switch (o) {
 		case 'N': // Number of cores
 			core_limit = mystrtol(optarg, 10);
@@ -842,7 +692,15 @@ main(int argc, char **argv)
 #endif
 
 #ifdef USE_SSL
-	init_openssl();
+	init_openssl(use_global_lock, CRYPTO_num_locks());
+
+#ifndef USE_LINUX
+	ssl_ctx = create_ssl_context(g_mctx);
+#else
+	ssl_ctx = create_ssl_context();
+#endif
+	configure_ssl_context(ssl_ctx);
+
 #endif
 
 	// Spawn listener threads
@@ -862,7 +720,7 @@ main(int argc, char **argv)
 	}
 
 #ifdef USE_SSL
-	cleanup_openssl();
+	cleanup_openssl(use_global_lock, CRYPTO_num_locks());
 #endif
 
 #ifndef USE_LINUX

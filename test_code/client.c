@@ -1,4 +1,3 @@
-
 /*
  * Continuously maintain the given max_concurrency concurrent connections
  * with the given host:port and verify the contents of the -k messages of
@@ -28,6 +27,7 @@
 #ifdef USE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ssl_functions.h>
 #endif
 
 #ifndef USE_LINUX
@@ -54,7 +54,7 @@
  * max_concurrency is not reached yet, but there are resources from a prior
  * closed connection that has not been released yet.
  *----------------------------------------------------------------------------*/
-#define FD_OVERHEAD_FACTOR 3
+#define FD_OVERHEAD_FACTOR 6
 /*----------------------------------------------------------------------------*/
 #define MAX_CPUS 32
 #define BUF_SIZE (8 * 1024)
@@ -104,10 +104,6 @@ struct thread_context {
 	mctx_t mctx;
 #endif
 	
-#ifdef USE_SSL
-	SSL_CTX *ssl_ctx;
-#endif
-
 	int core;
 	int ep;
 
@@ -137,6 +133,16 @@ static in_addr_t saddr;
 static pthread_t app_thread[MAX_CPUS];
 static struct thread_context contexts[MAX_CPUS];
 static pthread_t main_thread;
+
+#ifdef USE_SSL
+int use_global_lock = FALSE;
+SSL_CTX *ssl_ctx;
+
+#ifndef USE_LINUX
+static mctx_t g_ctx[MAX_CPUS];
+#endif
+
+#endif
 /*----------------------------------------------------------------------------*/
 int
 setsock_nonblock(int fd)
@@ -195,6 +201,9 @@ init_context(int core)
 		free(ctx);
 		return NULL;
 	}
+#ifdef USE_SSL
+	g_ctx[core] = ctx->mctx; // Only necessary if SSL + MTCP
+#endif
 #endif
 
 	return ctx;
@@ -208,8 +217,8 @@ clean_connection(struct connection *conn)
 	conn->content_error = 0;
 
 #ifdef USE_SSL
-	int accepted = 0;
-	SSL *ssl = NULL;
+	conn->accepted = 0;
+	conn->ssl = NULL;
 #endif
 
 	gettimeofday(&conn->t_start, NULL);
@@ -243,6 +252,31 @@ create_connection(struct thread_context *ctx)
 	ret = SOCKET_FUNC(connect, ctx->core, sockid, (struct sockaddr *) &addr,
 							sizeof(struct sockaddr_in));
 	if (ret < 0) {
+		// TODO: REMOVE THIS AFTER DEBUG
+		switch (errno) {
+		case EBADF:
+			printf("EBADF\n"); break;
+		case ENOTSOCK:
+			printf("ENOTSOCK\n"); break;
+		case EFAULT:
+			printf("EFAULT\n"); break;
+		case EAFNOSUPPORT:
+			printf("EAFNOSUPPORT\n"); break;
+		case EISCONN:
+			printf("EISCONN\n"); break;
+		case EALREADY:
+			printf("EALREADY\n"); break;
+		case EINVAL:
+			printf("EINVAL\n"); break;
+		case EAGAIN:
+			printf("EAGAIN\n"); break;
+		case ENOMEM:
+			printf("ENOMEM\n"); break;
+		case ENOSYS:
+			printf("ENOSYS\n"); break;
+		case ETIMEDOUT:
+			printf("ETIMEDOUT\n"); break;
+		}
 		if (errno != EINPROGRESS) {
 			perror("connect");
 			SOCKET_FUNC(close, ctx->core, sockid);
@@ -278,6 +312,10 @@ close_connection(struct thread_context *ctx, int sockid)
 	epoll_ctl(ctx->ep, EPOLL_CTL_DEL, sockid, NULL);
 #endif
 
+#ifdef USE_SSL
+	SSL_free(ctx->connections[sockid].ssl);
+#endif
+	
 	SOCKET_FUNC(close, ctx->core, sockid);
 	ctx->pending--;
 	while (ctx->pending < concurrency) {
@@ -312,6 +350,39 @@ download_complete(struct thread_context *ctx, int sockid,
 }
 /*----------------------------------------------------------------------------*/
 static inline int
+do_ssl_handshake(struct thread_context *ctx, int sockid)
+{
+#ifdef USE_SSL
+	struct connection *conn = &ctx->connections[sockid];
+		
+	// Expect ssl handshake if it hasn't been done yet
+	if (conn->ssl == NULL) {
+		conn->accepted = 0;
+		conn->ssl = ssl_new_connection(ssl_ctx, sockid);
+	}
+	
+	if (!conn->accepted) {
+		int rd = SSL_connect(conn->ssl);
+		if (rd <= 0) {
+			int err = SSL_get_error(conn->ssl, rd);
+			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+				return 1;
+			}
+			
+			ERR_print_errors_fp(stderr);
+			fprintf(stderr, "Socket %d: SSL handshake failed\n", sockid);
+			return -2;
+		}
+		conn->accepted = 1;
+	}
+#else
+	fprintf(stderr, "Client not compiled with SSL support\n");
+#endif
+
+	return 1;
+}
+/*----------------------------------------------------------------------------*/
+static inline int
 handle_read_event(struct thread_context *ctx, int sockid)
 {
 	char buf[BUF_SIZE];
@@ -319,7 +390,10 @@ handle_read_event(struct thread_context *ctx, int sockid)
 	struct connection *conn = &ctx->connections[sockid];
 
 #ifdef USE_SSL
-	// TODO: Add ssl handshake handling
+	int ret = do_ssl_handshake(ctx, sockid);
+	if (ret <= 0) {
+		return ret;
+	}
 #endif
 	
 	int rd = 1;
@@ -386,10 +460,10 @@ run_client_thread(void *args)
 	int core = *(int *) args;
 	int maxevents = max_fds * FD_OVERHEAD_FACTOR;
 	struct thread_context *ctx = &contexts[core];
+	ctx = init_context(core);
 
 #ifndef USE_LINUX
 	mtcp_core_affinitize(core);
-	ctx = init_context(core);
 	if (ctx == NULL) {
 		fprintf(stderr, "Failed to create context\n");
 		return NULL;
@@ -473,12 +547,18 @@ run_client_thread(void *args)
 				
 			} else if (IS_EVENT_TYPE(events[i].events, EPOLLIN)) {
 
-				handle_read_event(ctx, efd);
+				if (handle_read_event(ctx, efd) <= 0) {
+					ctx->errors++;
+					close_connection(ctx, efd);
+				}
 				
 			} else if (IS_EVENT_TYPE(events[i].events, EPOLLOUT)) {
 
 #ifdef USE_SSL
-				do_ssl_handshake(ctx, efd);
+				if (do_ssl_handshake(ctx, efd) <= 0) {
+					ctx->errors++;
+					close_connection(ctx, efd);
+				}
 #endif
 				
 			}
@@ -582,7 +662,7 @@ main(int argc, char **argv)
 	saddr = INADDR_ANY;
 
 	concurrency = max_concurrency / core_limit;
-	max_fds = concurrency * 3;
+	max_fds = concurrency * FD_OVERHEAD_FACTOR;
 
 	// Generate ascii message of s characters
 	if (msg_size > 0) {
@@ -616,7 +696,13 @@ main(int argc, char **argv)
 #endif
 
 #ifdef USE_SSL
-	init_openssl();
+	init_openssl(use_global_lock, CRYPTO_num_locks());
+#ifndef USE_LINUX
+	ssl_ctx = create_ssl_context(g_ctx);
+#else
+	ssl_ctx = create_ssl_context();
+#endif
+	configure_ssl_context(ssl_ctx);
 #endif
 
 	int cores[MAX_CPUS];
@@ -637,7 +723,9 @@ main(int argc, char **argv)
 	}
 
 #ifdef USE_SSL
-	cleanup_openssl();
+	cleanup_openssl(use_global_lock, CRYPTO_num_locks());
+	// TODO: Move free cleanup, requires messenger to be refactored
+	SSL_CTX_free(ssl_ctx);
 #endif
 
 #ifndef USE_LINUX

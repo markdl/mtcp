@@ -40,7 +40,7 @@
 #define TOTAL_TCP_HEADER_LEN	54	// total header length
 
 /* configrations */
-#define BACKLOG_SIZE (10*1024)
+#define BACKLOG_SIZE (10000*1024)
 #define MAX_PKT_SIZE (2*1024)
 #define ETH_NUM 4
 
