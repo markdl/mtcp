@@ -182,7 +182,8 @@ init_server_thread(int core, struct thread_context *ctx) {
 	}
 	
 	ctx->connections = (struct connection *)
-		calloc(max_fds * FD_OVERHEAD_FACTOR, sizeof(struct connection));
+		calloc(max_fds * FD_OVERHEAD_FACTOR * core_limit,
+				 sizeof(struct connection));
 	if (ctx->connections == NULL) {
 		perror("connections calloc");
 		SOCKET_FUNC(close, core, ctx->ep);
@@ -366,7 +367,7 @@ accept_connection(struct thread_context *ctx, int core, int listener)
 	if (c >= 0) {
 
 #ifndef USE_LINUX
-		if (c >= max_fds * FD_OVERHEAD_FACTOR) {
+		if (c >= max_fds * FD_OVERHEAD_FACTOR * core_limit) {
 			fprintf(stderr, "Invalid socket id %d\n", c);
 			return -1;
 		}
@@ -514,6 +515,16 @@ run_server_thread(void *args)
 		int do_accept = FALSE;
 
 		for (int i = 0; i < nevents; i++) {
+			
+			if (i % 100 == 0) {
+				gettimeofday(&curr_tv, NULL);
+				if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
+					print_interval_stats(ctx, core, prev_tv, curr_tv);
+					prev_tv = curr_tv;
+				}
+			}
+
+			
 #ifndef USE_LINUX
 			int efd = events[i].data.sockid;
 #else
