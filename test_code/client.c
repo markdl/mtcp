@@ -116,6 +116,12 @@ struct thread_context {
 	uint64_t errors;
 	uint64_t content_errors;
 	uint64_t length_errors;
+	uint64_t epoll_errors;
+	uint64_t read_errors;
+
+#ifdef USE_SSL
+	uint64_t handshake_errors;
+#endif
 
 	struct interval_stats stats;
 	struct connection *connections;
@@ -183,6 +189,12 @@ clean_context(struct thread_context *ctx)
 	ctx->errors = 0;
 	ctx->content_errors = 0;
 	ctx->length_errors = 0;
+	ctx->epoll_errors = 0;
+	ctx->read_errors = 0;
+	
+#ifdef USE_SSL
+	ctx->handshake_errors = 0;
+#endif
 
 	clean_interval_stats(&ctx->stats);
 }
@@ -251,39 +263,11 @@ create_connection(struct thread_context *ctx)
 
 	ret = SOCKET_FUNC(connect, ctx->core, sockid, (struct sockaddr *) &addr,
 							sizeof(struct sockaddr_in));
-	if (ret < 0) {
-		// TODO: REMOVE THIS AFTER DEBUG
-		switch (errno) {
-		case EBADF:
-			printf("EBADF\n"); break;
-		case ENOTSOCK:
-			printf("ENOTSOCK\n"); break;
-		case EFAULT:
-			printf("EFAULT\n"); break;
-		case EAFNOSUPPORT:
-			printf("EAFNOSUPPORT\n"); break;
-		case EISCONN:
-			printf("EISCONN\n"); break;
-		case EALREADY:
-			printf("EALREADY\n"); break;
-		case EINVAL:
-			printf("EINVAL\n"); break;
-		case EAGAIN:
-			printf("EAGAIN\n"); break;
-		case ENOMEM:
-			printf("ENOMEM\n"); break;
-		case ENOSYS:
-			printf("ENOSYS\n"); break;
-		case ETIMEDOUT:
-			printf("ETIMEDOUT\n"); break;
-		}
-		if (errno != EINPROGRESS) {
-			perror("connect");
-			SOCKET_FUNC(close, ctx->core, sockid);
-			return -1;
-		}
+	if (ret < 0 && errno != EINPROGRESS) {
+		perror("connect");
+		SOCKET_FUNC(close, ctx->core, sockid);
+		return -1;
 	}
-
 	ctx->started++;
 	ctx->pending++;
 	ctx->stats.connects++;
@@ -420,23 +404,38 @@ handle_read_event(struct thread_context *ctx, int sockid)
 	if (rd == 0) {
 		// Connection closed by host
 		download_complete(ctx, sockid, conn);
+		return 0;
 	} else if (rd < 0 && errno != EAGAIN) {
+		fprintf(stderr, "Error reading from socket\n");
+		perror("read");
+		ctx->read_errors++;
 		ctx->errors++;
 		close_connection(ctx, sockid);
+		return -1;
+	} else {
+
 	}
 
-	return 0;
+	return 1;
 }
 /*----------------------------------------------------------------------------*/
 void
 print_running_stats(struct thread_context *ctx)
 {
 	printf("[CPU %d] Running Stats - Completes: %lu, Incompletes: %lu, "
-			 "Started: %lu, Pending: %lu, Timeouts: %lu, Errors: %lu "
-			 "(content: %lu, length: %lu)\n",
+			 "Started: %lu, Pending: %lu, Errors: %lu (content: %lu, "
+			 "length: %lu, timeouts: %lu, epoll: %lu, read: %lu"
+#ifdef USE_SSL
+			 ", handshake: %lu"
+#endif
+			 ")\n",
 			 ctx->core, ctx->completes, ctx->incompletes, ctx->started,
-			 ctx->pending, ctx->timeouts, ctx->errors, ctx->content_errors,
-			 ctx->length_errors);
+			 ctx->pending, ctx->errors, ctx->content_errors, ctx->length_errors,
+			 ctx->timeouts, ctx->epoll_errors, ctx->read_errors
+#ifdef USE_SSL
+			 , ctx->handshake_errors
+#endif
+			 );
 	fflush(stdout);
 }
 /*----------------------------------------------------------------------------*/
@@ -526,6 +525,16 @@ run_client_thread(void *args)
 		}
 
 		for (int i = 0; i < nevents; i++) {
+
+			if (i % 100 == 0) {
+				gettimeofday(&curr_tv, NULL);
+				if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
+					print_interval_stats(ctx);
+					print_running_stats(ctx);
+					prev_tv = curr_tv;
+				}
+			}
+			
 #ifndef USE_LINUX
 			int efd = events[i].data.sockid;
 #else
@@ -542,21 +551,21 @@ run_client_thread(void *args)
 									 SO_ERROR, (void *) &err, &len) == 0) {
 					if (err == ETIMEDOUT)
 						ctx->timeouts++;
+					else
+						ctx->epoll_errors++;
 				}
 				close_connection(ctx, efd);
 				
 			} else if (IS_EVENT_TYPE(events[i].events, EPOLLIN)) {
 
-				if (handle_read_event(ctx, efd) <= 0) {
-					ctx->errors++;
-					close_connection(ctx, efd);
-				}
+				handle_read_event(ctx, efd);
 				
 			} else if (IS_EVENT_TYPE(events[i].events, EPOLLOUT)) {
 
 #ifdef USE_SSL
 				if (do_ssl_handshake(ctx, efd) <= 0) {
 					ctx->errors++;
+					ctx->handshake_errors++;
 					close_connection(ctx, efd);
 				}
 #endif

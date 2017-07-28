@@ -415,7 +415,18 @@ handle_read_event(struct thread_context *ctx, int core, int sockid)
 {
 	// Read event should only occur if doing SSL handshake
 #ifndef USE_SSL
-	fprintf(stderr, "SSL is not enabled\n");
+	size_t len = 1024;
+	char buf[len + 1];
+	int ret = SOCKET_FUNC(read, core, sockid, buf, len);
+	if (ret < 0) {
+		perror(GET_SOCKET_FUNC_NAME("read"));
+		return -1;
+	} else if (ret == 0) {
+		return 0;
+	}
+	
+	fprintf(stderr, "Read event occurred, but SSL is not enabled. Buffer "
+			  "received: %s\n", buf);
 	return -1;
 #else
 	struct connection conn = ctx->connections[sockid];
@@ -498,18 +509,27 @@ run_server_thread(void *args)
 
 	while (1) {
 
-	   gettimeofday(&curr_tv, NULL);
+		gettimeofday(&curr_tv, NULL);
 		if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
 			print_interval_stats(ctx, core, prev_tv, curr_tv);
 			prev_tv = curr_tv;
 		}
 		
 		int nevents = SOCKET_FUNC(epoll_wait, core, ctx->ep, events,
-										  max_fds * MAX_EVENTS_FACTOR, -1);
+										  max_fds * MAX_EVENTS_FACTOR, 1000);
 		if (nevents < 0) {
-			if (errno != EINTR)
+			if (errno != EINTR) {
 				perror(GET_SOCKET_FUNC_NAME(epoll_wait));
-			break;
+				break;
+			} else {
+				gettimeofday(&curr_tv, NULL);
+				if (curr_tv.tv_sec > prev_tv.tv_sec && curr_tv.tv_usec > prev_tv.tv_usec) {
+					print_interval_stats(ctx, core, prev_tv, curr_tv);
+					prev_tv = curr_tv;
+				}
+				
+				continue;
+			}
 		}
 
 		int do_accept = FALSE;
