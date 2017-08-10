@@ -408,11 +408,13 @@ process_clients(void *arg)
 				if (ret == 0) {
 					mtcp_epoll_ctl(mydata->mctx, ep, 
 						       MTCP_EPOLL_CTL_DEL, context->fd, 0);
-					mtcp_abort(mydata->mctx, context->fd);
+					//mtcp_abort(mydata->mctx, context->fd);
+					mtcp_close(mydata->mctx, context->fd);
 					free_context(pool, context);
 				} else if (ret < 0 && errno != EAGAIN) {
 					fprintf(stderr, "mtcp_read() error: %d(%s)\n", errno, strerror(errno));
-					mtcp_abort(mydata->mctx, context->fd);
+					//mtcp_abort(mydata->mctx, context->fd);
+					mtcp_close(mydata->mctx, context->fd);
 					free_context(pool, context);
 				}
 				/* WRITE */

@@ -1,36 +1,35 @@
-# Makefile for server
+SSL_INSTALL=/home/utcpdev/openssl/install
+MTCP_INSTALL=/home/utcpdev/mtcp/mtcp
+DPDK_INSTALL=/home/utcpdev/mtcp/dpdk
+MTCP_UTIL=/home/utcpdev/mtcp/util
 
-PSDIR = ../../../../io_engine/io_engine-2.0.38.2
-MTCPDIR = ../../../mtcp-io
-DPDKDIR = ../../../dpdk
+MTCP_UTIL_OBJ=$(addprefix $(MTCP_UTIL)/,http_parsing.o tdate_parse.o netlib.o)
 
-CC = gcc -g -O3
-CFLAGS = -m64 -g -O3 -pthread  -march=native -DRTE_MACHINE_CPUFLAG_SSE -DRTE_MACHINE_CPUFLAG_SSE2 -DRTE_MACHINE_CPUFLAG_SSE3 -DRTE_MACHINE_CPUFLAG_SSSE3 -DRTE_MACHINE_CPUFLAG_SSE4_1 -DRTE_MACHINE_CPUFLAG_SSE4_2 -DRTE_MACHINE_CPUFLAG_AES -DRTE_MACHINE_CPUFLAG_PCLMULQDQ -DRTE_MACHINE_CPUFLAG_AVX -DRTE_COMPILE_TIME_CPUFLAGS=RTE_CPUFLAG_SSE,RTE_CPUFLAG_SSE2,RTE_CPUFLAG_SSE3,RTE_CPUFLAG_SSSE3,RTE_CPUFLAG_SSE4_1,RTE_CPUFLAG_SSE4_2,RTE_CPUFLAG_AES,RTE_CPUFLAG_PCLMULQDQ,RTE_CPUFLAG_AVX  -I$(DPDKDIR)/include -include $(DPDKDIR)/include/rte_config.h -O3 -I./include/ -I/home/ajamshed/trunk/tcp/util/include -I$(MTCPDIR)/include -I/home/ajamshed/trunk/io_engine/io_engine-2.0.38.2/include
+CC=gcc -g -O0 -Wall -Werror -fgnu89-inline
+DPDK_MACHINE_FLAGS = $(shell cat ${DPDK_INSTALL}/include/cflags.txt)
+DPDK_LIB_FLAGS = $(shell cat ${DPDK_INSTALL}/lib/ldflags.txt)
+INCL=-I${SSL_INSTALL}/include -I${MTCP_INSTALL}/include -I${MTCP_UTIL}/include -I${DPDK_INSTALL}/include
 
-LDFLAGS = -m64 -g -O3 -pthread  -march=native -DRTE_MACHINE_CPUFLAG_SSE -DRTE_MACHINE_CPUFLAG_SSE2 -DRTE_MACHINE_CPUFLAG_SSE3 -DRTE_MACHINE_CPUFLAG_SSSE3 -DRTE_MACHINE_CPUFLAG_SSE4_1 -DRTE_MACHINE_CPUFLAG_SSE4_2 -DRTE_MACHINE_CPUFLAG_AES -DRTE_MACHINE_CPUFLAG_PCLMULQDQ -DRTE_MACHINE_CPUFLAG_AVX -DRTE_COMPILE_TIME_CPUFLAGS=RTE_CPUFLAG_SSE,RTE_CPUFLAG_SSE2,RTE_CPUFLAG_SSE3,RTE_CPUFLAG_SSSE3,RTE_CPUFLAG_SSE4_1,RTE_CPUFLAG_SSE4_2,RTE_CPUFLAG_AES,RTE_CPUFLAG_PCLMULQDQ,RTE_CPUFLAG_AVX -I$(DPDKDIR)/include -include $(DPDKDIR)/include/rte_config.h -O3 -I./include/ -I/home/ajamshed/trunk/tcp/util/include -I$(MTCPDIR)/include -I/home/ajamshed/trunk/io_engine/io_engine-2.0.38.2/include -include $(DPDKDIR)/include/rte_config.h -Wl,-export-dynamic -L$(DPDKDIR)/lib -L/home/ajamshed/trunk/io_engine/io_engine-2.0.38.2/lib -L$(MTCPDIR)/lib -Wl,-lnuma -Wl,-lmtcp -Wl,-lps -Wl,-lpthread -Wl,-lrt -Wl,-ldl -Wl,/home/ajamshed/trunk/tcp/util/http_parsing.o -Wl,/home/ajamshed/trunk/tcp/util/tdate_parse.o -L$(DPDKDIR)/lib -Wl,--whole-archive -Wl,-lrte_distributor -Wl,-lrte_kni -Wl,-lrte_pipeline -Wl,-lrte_table -Wl,-lrte_port -Wl,-lrte_timer -Wl,-lrte_hash -Wl,-lrte_lpm -Wl,-lrte_power -Wl,-lrte_acl -Wl,-lrte_meter -Wl,-lrte_sched -Wl,-lm -Wl,-lrt -Wl,--start-group -Wl,-lrte_kvargs -Wl,-lrte_mbuf -Wl,-lrte_ip_frag -Wl,-lethdev -Wl,-lrte_malloc -Wl,-lrte_mempool -Wl,-lrte_ring -Wl,-lrte_eal -Wl,-lrte_cmdline -Wl,-lrte_cfgfile -Wl,-lrte_pmd_bond -Wl,-lrte_pmd_vmxnet3_uio -Wl,-lrte_pmd_virtio_uio -Wl,-lrte_pmd_i40e -Wl,-lrte_pmd_ixgbe -Wl,-lrte_pmd_e1000 -Wl,-lrte_pmd_ring -Wl,-lrt -Wl,-lm -Wl,-ldl -Wl,--end-group -Wl,--no-whole-archive
+LIBS=-ldl -L${MTCP_INSTALL}/lib -L${DPDK_INSTALL}/lib -L${DPDK_INSTALL}/lib -lmtcp -lpthread -lnuma ${DPDK_LIB_FLAGS}
 
-MTCP_FLD = -lmtcp -L$(MTCPDIR)/lib/
-MTCP_INC = $(MTCPDIR)/include
-MTCPLIB = $(MTCPDIR)/lib/libmtcp.a
+TARGETS = server-linux server-mtcp
 
-PS_FLD = -lps -L$(PSDIR)/lib/
-PS_INC = $(PSDIR)/include
-PSLIB = $(PSDIR)/lib/libps.a
+all: ${TARGETS}
 
-INC = -I${MTCP_INC} -I${PS_INC}
-LIBS = -lnuma -lpthread -lrt
-LIB = ${PS_FLD} ${MTCP_FLD}
+%.o: %.c
+	${CC} -c $^ ${INCL} -o $@
 
-all: server-mtcp server-linux
+server-mtcp.o: server-mtcp.c
+	${CC} -c $^ ${INCL} -o $@
 
-server-mtcp: server-mtcp.c server-mtcp.h
-	$(CC) $(CFLAGS) $(INC) $(LIBS) $(LIB) -o $@ $< $(MTCPLIB) $(PSLIB) $(LDFLAGS)
+server-mtcp: server-mtcp.o
+	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
 
-server-linux: server-linux.c server-linux.h
-	$(CC) $(CFLAGS) $(LDFLAGS)  -o $@ $<
+server-linux.o: server-linux.c
+	${CC} -c $^ ${INCL} -o $@
 
-server-linux-ports: server-linux-ports.c server-linux-ports.h
-	$(CC) $(CFLAGS) $(LDFLAGS)  -o $@ $<
+server-linux: server-linux.o
+	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
 
 clean:
-	rm -rf server-mtcp server-linux *~
+	rm -f *.o *~ \#*\# ${TARGETS}
