@@ -5,7 +5,7 @@
 #define SERVER_IP               "127.0.0.1"
 #define SERVER_PORT             8080
 #define MAX_THREADS             8
-#define MAX_CONNS_PER_THREAD    4096
+#define MAX_CONNS_PER_THREAD    500000
 #define MAX_BUFSIZE        65536
 #define MAX_EVENTS MAX_CONNS_PER_THREAD * 4
 #define REUSEPORT 1 

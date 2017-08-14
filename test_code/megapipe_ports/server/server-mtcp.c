@@ -110,7 +110,8 @@ main(int argc, char *argv[])
 			break;
 		}
 	}
-	
+
+	printf("# of CPUs: %d\n", get_num_cpus());
 	assert(num_threads >= 1 && num_threads <= get_num_cpus());
 	
 	if(inet_aton(param_listenip, &listenip) == 0) {
@@ -177,6 +178,9 @@ void
 init_server() 
 {
 	struct mtcp_conf mcfg;
+	mtcp_getconf(&mcfg);
+	mcfg.num_cores = num_threads;
+	mtcp_setconf(&mcfg);
 	
 	/* initialize the mtcp context */
 	if (mtcp_init("config/mtcp.conf")) {
@@ -403,7 +407,12 @@ process_clients(void *arg)
 #ifdef VERBOSE
 					mydata->total_recvd += ret;
 #endif
+
+					if (context->recv_left == 0) {
+						break;
+					}
 				}
+
 				/* CLOSE/RESET */
 				if (ret == 0) {
 					mtcp_epoll_ctl(mydata->mctx, ep, 

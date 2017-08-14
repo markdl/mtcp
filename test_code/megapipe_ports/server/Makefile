@@ -12,7 +12,7 @@ INCL=-I${SSL_INSTALL}/include -I${MTCP_INSTALL}/include -I${MTCP_UTIL}/include -
 
 LIBS=-ldl -L${MTCP_INSTALL}/lib -L${DPDK_INSTALL}/lib -L${DPDK_INSTALL}/lib -lmtcp -lpthread -lnuma ${DPDK_LIB_FLAGS}
 
-TARGETS = server-linux server-mtcp
+TARGETS = server-linux server-mtcp server-linux-ports
 
 all: ${TARGETS}
 
@@ -29,6 +29,12 @@ server-linux.o: server-linux.c
 	${CC} -c $^ ${INCL} -o $@
 
 server-linux: server-linux.o
+	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
+
+server-linux-ports.o: server-linux-ports.c
+	${CC} -c $^ ${INCL} -o $@
+
+server-linux-ports: server-linux-ports.o
 	${CC} $^ ${LIBS} ${MTCP_UTIL_OBJ} -o $@
 
 clean:
