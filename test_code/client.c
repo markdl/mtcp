@@ -4,6 +4,8 @@
  * size -s received from the host.
  */
 
+#define _GNU_SOURCE
+#define _LARGEFILE64_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <sys/time.h>
+#include <sched.h>
 
 #ifdef USE_SSL
 #include <openssl/ssl.h>
@@ -254,6 +257,12 @@ create_connection(struct thread_context *ctx)
 #ifdef USE_LINUX
 	if (setsockopt(sockid, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 }, sizeof(int)) < 0)
 		perror("setsockopt REUSEADDR");
+
+	struct linger linger;
+	linger.l_onoff = 1;
+	linger.l_linger = 0;
+	if (setsockopt(sockid, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)) < 0)
+		perror("Unable to set socket linger option");
 #endif
 
 	struct sockaddr_in addr;
@@ -453,6 +462,26 @@ print_interval_stats(struct thread_context *ctx)
 	clean_interval_stats(&ctx->stats);
 }
 /*----------------------------------------------------------------------------*/
+int
+bind_cpu(int core)
+{
+	size_t n = (size_t) GetNumCPUs();
+
+	assert(core >= 0 && core < (int) n);
+
+	cpu_set_t *cmask = CPU_ALLOC(n);
+	if (cmask == NULL)
+		return -1;
+
+	CPU_ZERO_S(n, cmask);
+	CPU_SET_S(core, n, cmask);
+
+	int ret = sched_setaffinity(0, n, cmask);
+	CPU_FREE(cmask);
+
+	return ret;
+}
+/*----------------------------------------------------------------------------*/
 void *
 run_client_thread(void *args)
 {
@@ -474,6 +503,7 @@ run_client_thread(void *args)
 	struct mtcp_epoll_event *events = (struct mtcp_epoll_event *)
 		calloc(maxevents, sizeof(struct mtcp_epoll_event));
 #else
+	bind_cpu(core);
 	struct epoll_event *events = (struct epoll_event *)
 		calloc(maxevents, sizeof(struct epoll_event));
 #endif

@@ -26,14 +26,13 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sched.h>
 
 #ifdef USE_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <ssl_functions.h>
 #endif
-
-#include <sched.h>
 
 #ifndef USE_LINUX
 
@@ -159,6 +158,26 @@ setsock_nonblock(int fd)
 }
 /*----------------------------------------------------------------------------*/
 int
+bind_cpu(int core)
+{
+	size_t n = (size_t) GetNumCPUs();
+
+	assert(core >= 0 && core < (int) n);
+
+	cpu_set_t *cmask = CPU_ALLOC(n);
+	if (cmask == NULL)
+		return -1;
+
+	CPU_ZERO_S(n, cmask);
+	CPU_SET_S(core, n, cmask);
+
+	int ret = sched_setaffinity(0, n, cmask);
+	CPU_FREE(cmask);
+
+	return ret;
+}
+/*----------------------------------------------------------------------------*/
+int
 init_server_thread(int core, struct thread_context *ctx) {
 #ifndef USE_LINUX
 	mtcp_core_affinitize(core);
@@ -169,6 +188,8 @@ init_server_thread(int core, struct thread_context *ctx) {
 		return -1;
 	}
 	g_mctx[core] = ctx->mctx;
+#else
+	bind_cpu(core);
 #endif
 
 	ctx->ep = SOCKET_FUNC(epoll_create, core, max_fds * MAX_EVENTS_FACTOR);
@@ -203,7 +224,7 @@ create_listening_socket(int core, struct thread_context *ctx)
 	int ret;
 	int create_socket = TRUE;
 	
-#ifdef USE_LINUX
+#ifdef USE_LINUX	
 	pthread_mutex_lock(&startup_lock);
 	if (linux_listener != -1) {
 		pthread_mutex_unlock(&startup_lock);
@@ -218,6 +239,14 @@ create_listening_socket(int core, struct thread_context *ctx)
 			perror(GET_SOCKET_FUNC_NAME(socket));
 			listener = -1;
 		} else {
+
+#ifdef USE_LINUX
+			struct linger linger;
+			linger.l_onoff = 1;
+			linger.l_linger = 0;
+			if (setsockopt(listener, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)) == -1)
+				perror("Unable to set socket linger option");
+#endif
 
 			ret = SOCKET_FUNC(setsock_nonblock, core, listener);
 			if (ret < 0) {
