@@ -6,10 +6,10 @@
 //#define VERBOSE 1
 #define SERVER_IP               "0.0.0.0"
 #define SERVER_PORT             8080
-#define MAX_THREADS             16
-#define MAX_CONNS_PER_THREAD    16384
-#define MAX_BUFSIZE             131072
-#define LISTEN_BACKLOG 1024
+#define MAX_THREADS             6
+#define MAX_CONNS_PER_THREAD    50000
+#define MAX_BUFSIZE             24576
+#define LISTEN_BACKLOG 20000
 /* Structure Definitions */
 struct threaddata {
 	pthread_t thread;

@@ -1,5 +1,5 @@
 /**
- * Simple client.
+ * Modified the client-ports code to use mTCP to better stress test the performance of the server.
  */
 
 #ifndef _GNU_SOURCE
@@ -13,8 +13,6 @@
 #include <assert.h>
 /* For socket(2) and connect(2) */
 #include <sys/socket.h>
-/* For close(2) */
-#include <unistd.h>
 /* For IPv4 */
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -30,12 +28,17 @@
 #include <errno.h>
 /* used in bind_cpu() */
 #include <sched.h>
-#include "client.h"
+#include "client-mtcp.h"
 
 /* signal handling */
 #include <signal.h>
 /* For setitimer(2) */
 #include <sys/time.h>
+
+#include <unistd.h>
+
+/* For mtcp */
+#include <mtcp_epoll.h>
 /*-------------------------------------------------------------------------------------------------------*/
 int num_threads = MAX_THREADS;
 int reqsize = 64;
@@ -45,39 +48,12 @@ int conns_per_thread = 32;
 int num_ports = 1;
 int port_gap = 1;
 struct threaddata tdata[MAX_THREADS];
+mctx_t g_ctx[MAX_THREADS];
 /*-------------------------------------------------------------------------------------------------------*/
 int
 get_num_cpus()                             
 {                                              
 	return sysconf(_SC_NPROCESSORS_ONLN);  
-}                                              
-/*-------------------------------------------------------------------------------------------------------*/
-int
-bind_cpu(int cpu)                          
-{                                              
-	cpu_set_t *cmask;                      
-	size_t n;                              
-	int ret;                               
-
-	n = get_num_cpus();                    
-
-	if (cpu < 0 || cpu >= (int)n) {        
-		errno = -EINVAL;               
-		return -1;                     
-	}                                      
-
-	cmask = CPU_ALLOC(n);                  
-	if (cmask == NULL)                     
-		return -1;                     
-
-	CPU_ZERO_S(n, cmask);                  
-	CPU_SET_S(cpu, n, cmask);              
-
-	ret = sched_setaffinity(0, n, cmask);  
-
-	CPU_FREE(cmask);                       
-
-	return ret;                            
 }                                              
 /*-------------------------------------------------------------------------------------------------------*/
 void
@@ -122,6 +98,10 @@ stop_threads(void)
 		if(pthread_join(tdata[i].thread, NULL) != 0) {
 			perror("Error joining thread");
 		}
+	}
+
+	for (i = 0; i < num_threads; i++) {
+	   mtcp_destroy_context(g_ctx[i]);
 	}
 }
 /*-------------------------------------------------------------------------------------------------------*/
@@ -258,13 +238,22 @@ main(int argc, char *argv[])
 	else
 		printf("%d RPC queries per connection (request size %d, response size %d)\n", msgs_per_conn, reqsize, ressize);
 
-	for(i = 0; i < num_threads; i++) {
-		/* Create the epoll FD for this thread */
-		if((tdata[i].epfd = epoll_create(conns_per_thread)) == -1) {
-			perror("Unable to create epoll FD");
-			exit_cleanup();
-		}
+	struct mtcp_conf mcfg;
+	mtcp_getconf(&mcfg);
+	mcfg.num_cores = num_threads;
+	mtcp_setconf(&mcfg);
 
+	int ret = mtcp_init("config/mtcp.conf");
+	if (ret) {
+		fprintf(stderr, "Failed to initialize mtcp\n");
+		exit(EXIT_FAILURE);
+	}
+	mtcp_getconf(&mcfg);
+	mcfg.max_concurrency = conns_per_thread * 3;
+	mcfg.max_num_buffers = conns_per_thread * 3;
+	mtcp_setconf(&mcfg);
+
+	for(i = 0; i < num_threads; i++) {
 		/* Store conection info */
 		if(inet_aton(param_destip, &(tdata[i].destip)) == 0) {
 			fprintf(stderr, "Invalid destination IP\n");
@@ -300,9 +289,9 @@ main(int argc, char *argv[])
 }
 /*-------------------------------------------------------------------------------------------------------*/
 int
-send_rpc(int epfd, char *buf, struct conn_context *ctx, int cpu_id)
+send_rpc(int epfd, char *buf, struct conn_context *ctx, int cpu_id, mctx_t mctx)
 {
-	struct epoll_event evt;
+	struct mtcp_epoll_event evt;
 	int ret;
 
 	if (reqsize == ctx->send_left) {
@@ -310,7 +299,7 @@ send_rpc(int epfd, char *buf, struct conn_context *ctx, int cpu_id)
 		*((int *)(buf + 4)) = ressize;
 	}
     
-	ret = write(ctx->fd, buf, ctx->send_left);
+	ret = mtcp_write(mctx, ctx->sockid, buf, ctx->send_left);
 	tdata[cpu_id].total_sent += ret;
 	if (ret < 8)
 		return -1;
@@ -322,18 +311,18 @@ send_rpc(int epfd, char *buf, struct conn_context *ctx, int cpu_id)
 		ctx->msg_cnt++;
 		ctx->recv_left = ressize;
 		ctx->send_left = reqsize;
-		evt.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+		evt.events = MTCP_EPOLLIN | MTCP_EPOLLHUP | MTCP_EPOLLERR;
 		evt.data.ptr = ctx;
 
-		if (epoll_ctl(epfd, EPOLL_CTL_MOD, ctx->fd, &evt) != 0) {
+		if (mtcp_epoll_ctl(mctx, epfd, MTCP_EPOLL_CTL_MOD, ctx->sockid, &evt) != 0) {
 			perror("Unable to add socket to epoll");
 			exit_cleanup();
 		}
 	} else {
-		evt.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
+		evt.events = MTCP_EPOLLOUT | MTCP_EPOLLHUP | MTCP_EPOLLERR;
 		evt.data.ptr = ctx;
 
-		if (epoll_ctl(epfd, EPOLL_CTL_MOD, ctx->fd, &evt) != 0) {
+		if (mtcp_epoll_ctl(mctx, epfd, MTCP_EPOLL_CTL_MOD, ctx->sockid, &evt) != 0) {
 			perror("Unable to add socket to epoll");
 			exit_cleanup();
 		}
@@ -350,20 +339,34 @@ client_thread(void *arg)
 
 	struct conn_context ctxs[conns_per_thread];
 
-	bind_cpu(tdata->cpu_id);
+	mtcp_core_affinitize(tdata->cpu_id);
+
+	g_ctx[tdata->cpu_id] = mtcp_create_context(tdata->cpu_id);
+	if (g_ctx[tdata->cpu_id] == NULL) {
+		fprintf(stderr, "Failed to create mtcp context\n");
+		return NULL;
+	}
+	mctx_t mctx = g_ctx[tdata->cpu_id];
+
+	mtcp_init_rss(mctx, tdata->srcip.s_addr, IP_RANGE, tdata->destip.s_addr, tdata->destport);
+
+	if((tdata->epfd = mtcp_epoll_create(mctx, conns_per_thread * 3)) == -1) {
+		perror("Unable to create epoll FD");
+		exit_cleanup();
+	}
 
 	printf("CPU%d connecting to port %d\n", tdata->cpu_id, tdata->destport);
 	/* Create the initial pool of connections */
 	for (i = 0; i < conns_per_thread; i++)
-		conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, &ctxs[i]);
+		conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, &ctxs[i], mctx);
 
 	while (1) {
 		int num_events;
 		int ret;
 		char buf[BUFSIZE];
-		struct epoll_event evts[EVENTS_PER_BATCH];
+		struct mtcp_epoll_event evts[EVENTS_PER_BATCH];
 
-		num_events = epoll_wait(tdata->epfd, evts, EVENTS_PER_BATCH, -1);
+		num_events = mtcp_epoll_wait(mctx, tdata->epfd, evts, EVENTS_PER_BATCH, -1);
 
 
 		if (num_events <= 0) {
@@ -377,43 +380,54 @@ client_thread(void *arg)
 			struct conn_context *ctx = (struct conn_context *)evts[i].data.ptr;
 			int broken = 0;
 
-			if (evts[i].events & (EPOLLHUP | EPOLLERR)) {
+			if (evts[i].events & (MTCP_EPOLLHUP | MTCP_EPOLLERR)) {
 				/* retry */
-				close(ctx->fd);
-				conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx);
+				mtcp_close(mctx, ctx->sockid);
+				conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
 				continue;
 			}
    
-			if (evts[i].events == EPOLLOUT) {
+			if (evts[i].events == MTCP_EPOLLOUT) {
 				if (msgs_per_conn == 0) {
-					close(ctx->fd);
-					conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx);
+					mtcp_close(mctx, ctx->sockid);
+					conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
 				} else {
-					broken = send_rpc(tdata->epfd, buf, ctx, tdata->cpu_id);
+					broken = send_rpc(tdata->epfd, buf, ctx, tdata->cpu_id, mctx);
 					tdata->trancnt++;
 				}
-			} else if (evts[i].events == EPOLLIN) {
-				ret = read(ctx->fd, buf, ressize);
-				assert(ret > 0);
-				assert(ret <= ctx->recv_left);
+			} else if (evts[i].events == MTCP_EPOLLIN) {
+				ret = mtcp_read(mctx, ctx->sockid, buf, ressize);
+				if (ret < 0) {
+					if (errno == EAGAIN) {
+						ret = 0;
+					} else {
+						perror("mtcp_read");
+						mtcp_close(mctx, ctx->sockid);
+						conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
+						continue;
+					}
+				}
+				/*assert(ret > 0);
+				  assert(ret <= ctx->recv_left);*/
 				tdata->total_recvd += ret;
 				ctx->recv_left -= ret;
+
 				if (ctx->recv_left > 0)
 					continue;
-    
+				
 				if (ctx->msg_cnt < msgs_per_conn) {
-					broken = send_rpc(tdata->epfd, buf, ctx, tdata->cpu_id);
+					broken = send_rpc(tdata->epfd, buf, ctx, tdata->cpu_id, mctx);
 					tdata->trancnt++;
 				} else {
-					close(ctx->fd);
-					conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx);
+					mtcp_close(mctx, ctx->sockid);
+					conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
 				}
 			} else
 				assert(0);
 
 			if (broken) {
-				close(ctx->fd);
-				conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx);
+				mtcp_close(mctx, ctx->sockid);
+				conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
 			}
 		}
 	}
@@ -423,32 +437,20 @@ client_thread(void *arg)
 /*-------------------------------------------------------------------------------------------------------*/
 void
 conn_client(struct in_addr destip, uint16_t destport, struct in_addr srcip, 
-				int epfd, struct conn_context *ctx) {
+				int epfd, struct conn_context *ctx, mctx_t mctx) {
 	int skt;
-	int reuse;
-	struct linger linger;
 	struct sockaddr_in destaddr, srcaddr;
 	socklen_t daddrlen = sizeof(destaddr), saddrlen = sizeof(srcaddr);
-	struct epoll_event evt;
+	struct mtcp_epoll_event evt;
 	int status;
 
 	/* Open the socket */
-	if((skt = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1) {
+	if((skt = mtcp_socket(mctx, AF_INET, SOCK_STREAM, 0)) == -1) {
 		perror("Unable to open socket");
 		exit_cleanup();
 	}
-
-	/* Allow quick reuse of outgoing ports */
-	reuse = 1;
-	if(setsockopt(skt, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) ==
-		-1) {
-		perror("Unable to set socket options");
-		exit_cleanup();
-	}
-	linger.l_onoff = 1;
-	linger.l_linger = 0;
-	if(setsockopt(skt, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)) == -1) {
-		perror("Unable to set socket linger option");
+	if (mtcp_setsock_nonblock(mctx, skt) < 0) {
+		fprintf(stderr, "Failed to set socket in nonblocking mode\n");
 		exit_cleanup();
 	}
 
@@ -463,25 +465,25 @@ conn_client(struct in_addr destip, uint16_t destport, struct in_addr srcip,
 	srcaddr.sin_addr = srcip;
 
 	/* Bind the socket to the src IP */
-	if(bind(skt, (struct sockaddr *)&srcaddr, saddrlen) == -1) {
+	if(mtcp_bind(mctx, skt, (struct sockaddr *)&srcaddr, saddrlen) == -1) {
 		perror("Unable to bind");
 		exit_cleanup();
 	}
 
-	ctx->fd = skt;
+	ctx->sockid = skt;
 	ctx->msg_cnt = 0;
 	ctx->send_left = reqsize;
     
 	/* Add the socket to epoll */
-	evt.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
+	evt.events = MTCP_EPOLLOUT | MTCP_EPOLLHUP | MTCP_EPOLLERR;
 	evt.data.ptr = ctx;
 
-	if(epoll_ctl(epfd, EPOLL_CTL_ADD, skt, &evt) != 0) {
+	if(mtcp_epoll_ctl(mctx, epfd, MTCP_EPOLL_CTL_ADD, skt, &evt) != 0) {
 		perror("Unable to add socket to epoll");
 		exit_cleanup();
 	}
 
-	status = connect(skt, (struct sockaddr *)&destaddr, daddrlen);
+	status = mtcp_connect(mctx, skt, (struct sockaddr *)&destaddr, daddrlen);
 
 	if(status != -1 || errno != EINPROGRESS) {
 		perror("nonblocking connect() failed");

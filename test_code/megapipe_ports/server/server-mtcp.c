@@ -45,7 +45,7 @@ struct threaddata tdata[MAX_THREADS];
 
 int num_threads = MAX_THREADS;
 
-#define MAX_FLOW_NUM  (100000)
+#define MAX_FLOW_NUM  (50000)
 #define RCVBUF_SIZE (1*1024)
 #define SNDBUF_SIZE (1*1024)
 #define HT_SUPPORT 0
@@ -53,35 +53,35 @@ int num_threads = MAX_THREADS;
 int
 get_num_cpus()
 {
-        return sysconf(_SC_NPROCESSORS_ONLN);
+	return sysconf(_SC_NPROCESSORS_ONLN);
 }
 /*-------------------------------------------------------------------------------------------------------*/
 int
 bind_cpu(int cpu)
 {
-        cpu_set_t *cmask;
-        size_t n;
-        int ret;
+	cpu_set_t *cmask;
+	size_t n;
+	int ret;
 	
-        n = get_num_cpus();
+	n = get_num_cpus();
 	
-        if (cpu < 0 || cpu >= (int)n) {
-                errno = -EINVAL;
-                return -1;
-        }
+	if (cpu < 0 || cpu >= (int)n) {
+		errno = -EINVAL;
+		return -1;
+	}
 	
-        cmask = CPU_ALLOC(n);
-        if (cmask == NULL)
-                return -1;
+	cmask = CPU_ALLOC(n);
+	if (cmask == NULL)
+		return -1;
 	
-        CPU_ZERO_S(n, cmask);
-        CPU_SET_S(cpu, n, cmask);
+	CPU_ZERO_S(n, cmask);
+	CPU_SET_S(cpu, n, cmask);
 	
-        ret = sched_setaffinity(0, n, cmask);
+	ret = sched_setaffinity(0, n, cmask);
 	
-        CPU_FREE(cmask);
+	CPU_FREE(cmask);
 	
-        return ret;
+	return ret;
 }
 /*-------------------------------------------------------------------------------------------------------*/
 int
@@ -213,7 +213,7 @@ init_threads(struct in_addr ip, uint16_t port)
 		tdata[i].port = port;
 		
 		if(pthread_create(&(tdata[i].thread), NULL, process_clients,
-				  &(tdata[i])) != 0) {
+								&(tdata[i])) != 0) {
 			perror("Unable to create worker thread");
 			exit_cleanup();
 		}
@@ -229,10 +229,17 @@ init_pool(int size)
 	assert(size > 0);
 	
 	ret = malloc(sizeof(struct context_pool));
-	assert(ret);
+	if (ret == NULL) {
+		fprintf(stderr, "Failed to allocate memory for context pool\n");
+		exit(EXIT_FAILURE);
+	}
 	
 	ret->arr = malloc(sizeof(struct conn_context) * size);
-	assert(ret->arr);
+	if (ret->arr == NULL) {
+		fprintf(stderr, "Failed to allovate memory for context array\n");
+		free(ret);
+		exit(EXIT_FAILURE);
+	}
 	
 	ret->total = size;
 	ret->allocated = 0;
@@ -319,7 +326,7 @@ process_clients(void *arg)
 	/* saddr.sin_addr.s_addr = INADDR_ANY; */
 	saddr.sin_port = htons(mydata->port);
 	ret = mtcp_bind(mydata->mctx, listener, 
-			(struct sockaddr *)&saddr, sizeof(struct sockaddr_in));
+						 (struct sockaddr *)&saddr, sizeof(struct sockaddr_in));
 	if (ret < 0) {
 		fprintf(stderr, "Failed to bind to the listening socket!\n");
 		exit(EXIT_FAILURE);
@@ -347,7 +354,9 @@ process_clients(void *arg)
 	
 	ev.events = MTCP_EPOLLIN;
 	ev.data.sockid = listener;
-	mtcp_epoll_ctl(mydata->mctx, ep, MTCP_EPOLL_CTL_ADD, listener, &ev);
+	if (mtcp_epoll_ctl(mydata->mctx, ep, MTCP_EPOLL_CTL_ADD, listener, &ev) == -1) {
+		fprintf(stderr, "Failed to add event to epoll\n");
+	}
 	
 	while (1) {
 		struct conn_context *context;
@@ -374,12 +383,13 @@ process_clients(void *arg)
 							fprintf(stderr, "Failed to set socket in nonblocking mode.\n");
 							exit(EXIT_FAILURE);
 						}
-						mtcp_epoll_ctl(mydata->mctx, ep, 
-							       MTCP_EPOLL_CTL_ADD, sockid, &ev);
+						if (mtcp_epoll_ctl(mydata->mctx, ep, MTCP_EPOLL_CTL_ADD, sockid, &ev) == -1) {
+						  		fprintf(stderr, "Failed to add event to epoll\n");
+						}
 					} else {
 						if (errno != EAGAIN) {
 							fprintf(stderr, "mtcp_accept() error %s\n", 
-								strerror(errno));
+									  strerror(errno));
 						}
 						break;
 					}
@@ -389,7 +399,7 @@ process_clients(void *arg)
 				context = events[i].data.ptr;
 				/* READ */
 				while ((ret = mtcp_read(mydata->mctx, 
-							context->fd, context->buf, MAX_BUFSIZE)) > 0) {
+												context->fd, context->buf, MAX_BUFSIZE)) > 0) {
 					if (context->recv_left == 0 && context->send_left == 0) {
 						reqsize = *((int *)context->buf);
 						assert(ret <= reqsize);
@@ -416,7 +426,7 @@ process_clients(void *arg)
 				/* CLOSE/RESET */
 				if (ret == 0) {
 					mtcp_epoll_ctl(mydata->mctx, ep, 
-						       MTCP_EPOLL_CTL_DEL, context->fd, 0);
+										MTCP_EPOLL_CTL_DEL, context->fd, 0);
 					//mtcp_abort(mydata->mctx, context->fd);
 					mtcp_close(mydata->mctx, context->fd);
 					free_context(pool, context);
@@ -429,7 +439,7 @@ process_clients(void *arg)
 				/* WRITE */
 				if (context->recv_left == 0 && context->send_left > 0) {
 					ret = mtcp_write(mydata->mctx,
-							 context->fd, context->buf, context->send_left);
+										  context->fd, context->buf, context->send_left);
 					if (ret != -1) {
 						mydata->trancnt += 1;
 #ifdef VERBOSE
@@ -437,7 +447,7 @@ process_clients(void *arg)
 #endif
 						if (ret != context->send_left)
 							fprintf(stderr, "context->send_left: %u, ret: %u\n",
-								context->send_left, ret);
+									  context->send_left, ret);
 						context->send_left -= ret;
 					}
 					else {
