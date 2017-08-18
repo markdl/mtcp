@@ -12,7 +12,7 @@
 
 #define BUFSIZE 65536
 #define EVENTS_PER_BATCH 32
-#define IP_RANGE 10
+#define IP_RANGE 1
 
 /* Structure Definitions */
 struct threaddata {

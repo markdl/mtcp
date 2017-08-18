@@ -350,9 +350,10 @@ client_thread(void *arg)
 
 	mtcp_init_rss(mctx, tdata->srcip.s_addr, IP_RANGE, tdata->destip.s_addr, tdata->destport);
 
+	/* Create the epoll FD for this thread */
 	if((tdata->epfd = mtcp_epoll_create(mctx, conns_per_thread * 3)) == -1) {
-		perror("Unable to create epoll FD");
-		exit_cleanup();
+	  perror("Unable to create epoll FD");
+	  exit_cleanup();
 	}
 
 	printf("CPU%d connecting to port %d\n", tdata->cpu_id, tdata->destport);
@@ -397,24 +398,13 @@ client_thread(void *arg)
 				}
 			} else if (evts[i].events == MTCP_EPOLLIN) {
 				ret = mtcp_read(mctx, ctx->sockid, buf, ressize);
-				if (ret < 0) {
-					if (errno == EAGAIN) {
-						ret = 0;
-					} else {
-						perror("mtcp_read");
-						mtcp_close(mctx, ctx->sockid);
-						conn_client(tdata->destip, tdata->destport, tdata->srcip, tdata->epfd, ctx, mctx);
-						continue;
-					}
-				}
-				/*assert(ret > 0);
-				  assert(ret <= ctx->recv_left);*/
+				assert(ret > 0);
+				assert(ret <= ctx->recv_left);
 				tdata->total_recvd += ret;
 				ctx->recv_left -= ret;
-
 				if (ctx->recv_left > 0)
 					continue;
-				
+    
 				if (ctx->msg_cnt < msgs_per_conn) {
 					broken = send_rpc(tdata->epfd, buf, ctx, tdata->cpu_id, mctx);
 					tdata->trancnt++;
@@ -439,8 +429,8 @@ void
 conn_client(struct in_addr destip, uint16_t destport, struct in_addr srcip, 
 				int epfd, struct conn_context *ctx, mctx_t mctx) {
 	int skt;
-	struct sockaddr_in destaddr, srcaddr;
-	socklen_t daddrlen = sizeof(destaddr), saddrlen = sizeof(srcaddr);
+	struct sockaddr_in destaddr;//, srcaddr;
+	socklen_t daddrlen = sizeof(destaddr);//, saddrlen = sizeof(srcaddr);
 	struct mtcp_epoll_event evt;
 	int status;
 
@@ -460,13 +450,23 @@ conn_client(struct in_addr destip, uint16_t destport, struct in_addr srcip,
 	destaddr.sin_port = htons(destport);
 	destaddr.sin_addr = destip;
 
+	/*
 	memset(&srcaddr, 0, saddrlen);
 	srcaddr.sin_family = AF_INET;
 	srcaddr.sin_addr = srcip;
+	*/
 
 	/* Bind the socket to the src IP */
+	/*
 	if(mtcp_bind(mctx, skt, (struct sockaddr *)&srcaddr, saddrlen) == -1) {
 		perror("Unable to bind");
+		exit_cleanup();
+	}
+	*/
+
+	status = mtcp_connect(mctx, skt, (struct sockaddr *)&destaddr, daddrlen);
+	if(status != -1 || errno != EINPROGRESS) {
+		perror("nonblocking connect() failed");
 		exit_cleanup();
 	}
 
@@ -480,13 +480,6 @@ conn_client(struct in_addr destip, uint16_t destport, struct in_addr srcip,
 
 	if(mtcp_epoll_ctl(mctx, epfd, MTCP_EPOLL_CTL_ADD, skt, &evt) != 0) {
 		perror("Unable to add socket to epoll");
-		exit_cleanup();
-	}
-
-	status = mtcp_connect(mctx, skt, (struct sockaddr *)&destaddr, daddrlen);
-
-	if(status != -1 || errno != EINPROGRESS) {
-		perror("nonblocking connect() failed");
 		exit_cleanup();
 	}
 }
