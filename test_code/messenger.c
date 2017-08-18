@@ -363,7 +363,7 @@ send_messages(struct thread_context *ctx, int core, int sockid)
 			conn->msg_pos = 0;
 			conn->msgs_sent++;
 			ctx->msgs_sent++;
-			} else {
+		} else {
 			conn->msg_pos += ret;
 		}
 		sent += ret;
@@ -561,8 +561,6 @@ run_server_thread(void *args)
 			}
 		}
 
-		int do_accept = FALSE;
-
 		for (int i = 0; i < nevents; i++) {
 			
 			if (i % 100 == 0) {
@@ -581,7 +579,13 @@ run_server_thread(void *args)
 #endif
 
 			if (efd == listener) {
-				do_accept = TRUE;
+
+				while (1) {
+					if (accept_connection(ctx, core, listener) < 0) {
+						break;
+					}
+				}	
+				
 			} else if (IS_EVENT_TYPE(events[i].events, EPOLLERR)) {
 
 				int err;
@@ -613,14 +617,6 @@ run_server_thread(void *args)
 			
 		} // End of events loop
 
-		if (do_accept) {
-			while (1) {
-				if (accept_connection(ctx, core, listener) < 0) {
-					break;
-				}
-			}
-		}
-		
 	} // end of while loop
 
 #ifndef USE_LINUX
